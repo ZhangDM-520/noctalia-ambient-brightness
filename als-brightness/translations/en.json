@@ -1,0 +1,36 @@
+{
+  "settings": {
+    "enabled": {
+      "label": "Enable adaptive brightness",
+      "description": "Turn the ambient-light adaptation on or off. While off, the panel is left completely alone."
+    },
+    "connector": {
+      "label": "Output connector",
+      "description": "The display whose brightness is driven, e.g. eDP-1. Must match a Noctalia brightness target."
+    },
+    "backlight": {
+      "label": "Backlight device",
+      "description": "Leave empty to auto-detect the first device under /sys/class/backlight."
+    },
+    "reference_raw": {
+      "label": "Reference sensor reading",
+      "description": "The sensor count (not lux) that maps to the reference brightness. The curve is anchored here, so setting this to the reading you see in your normal room is the whole calibration step."
+    },
+    "reference_percent": {
+      "label": "Reference brightness (%)",
+      "description": "The panel brightness, in percent, you want at the reference sensor reading. Defaults to your measured 70% at 185 counts."
+    },
+    "min_percent": {
+      "label": "Minimum brightness (%)",
+      "description": "Hard floor, so a dark or occluded reading can never drive the panel to an unreadable level."
+    },
+    "max_percent": {
+      "label": "Maximum brightness (%)",
+      "description": "Hard ceiling for the adapted brightness."
+    },
+    "colortemp": {
+      "label": "Adaptive colour temperature",
+      "description": "Also warm the panel toward the ambient colour temperature, driving Noctalia's own night light. Off by default. WARNING: enabling this turns night light on in forced mode and rewrites temperature_night in settings.toml, which overrides any day/night schedule you configured."
+    }
+  }
+}

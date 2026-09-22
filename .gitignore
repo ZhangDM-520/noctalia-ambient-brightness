@@ -1,0 +1,11 @@
+# Build artefacts and editor noise. Nothing generated here is committed.
+
+*.tmp
+*.als-brightness.tmp
+coverage.out
+counters.out
+profile.out
+trace.json
+
+# Local settings a run might leave behind
+settings.toml.bak-*

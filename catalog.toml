@@ -1,0 +1,19 @@
+# Plugin source index. One [[plugin]] row per plugin subdirectory.
+# This file is what makes the repository installable with:
+#     noctalia msg plugins source add als-brightness path ~/Projects/als-brightness
+#     noctalia msg plugins enable zhangdm/als-brightness
+# The per-plugin als-brightness/plugin.toml stays authoritative.
+
+[[plugin]]
+id = "zhangdm/als-brightness"
+name = "ALS Brightness"
+version = "0.1.0"
+updated_at = 1790045000
+added_at = 1790045000
+author = "zhangdm"
+license = "MIT"
+icon = "sun"
+description = "Adapts panel brightness to the ambient light sensor, and hands control back the moment you touch the brightness keys."
+deprecated = false
+plugin_api = 24
+tags = ["hardware", "display", "system"]

@@ -1,0 +1,74 @@
+id = "zhangdm/als-brightness"
+name = "ALS Brightness"
+version = "0.1.0"
+# Cumulative API levels. 23 = async-file-read, 24 = direct-argv. Both are used:
+# the service reads sysfs (sync readFile, measured at 0.03 ms, so the async path
+# is not needed here) and launches `noctalia msg` with an argv table rather than
+# a shell string, which is API 24.
+plugin_api = 24
+author = "zhangdm"
+license = "MIT"
+icon = "sun"
+description = "Adapts panel brightness to the ambient light sensor, and hands control back the moment you touch the brightness keys."
+dependencies = ["noctalia"]
+tags = ["hardware", "display", "system"]
+
+[[setting]]
+key = "enabled"
+type = "bool"
+label_key = "settings.enabled.label"
+description_key = "settings.enabled.description"
+default = true
+
+[[setting]]
+key = "connector"
+type = "string"
+label_key = "settings.connector.label"
+description_key = "settings.connector.description"
+default = "eDP-1"
+
+[[setting]]
+key = "backlight"
+type = "string"
+label_key = "settings.backlight.label"
+description_key = "settings.backlight.description"
+default = ""
+
+[[setting]]
+key = "reference_raw"
+type = "string"
+label_key = "settings.reference_raw.label"
+description_key = "settings.reference_raw.description"
+default = "185"
+
+[[setting]]
+key = "reference_percent"
+type = "string"
+label_key = "settings.reference_percent.label"
+description_key = "settings.reference_percent.description"
+default = "70"
+
+[[setting]]
+key = "min_percent"
+type = "string"
+label_key = "settings.min_percent.label"
+description_key = "settings.min_percent.description"
+default = "15"
+
+[[setting]]
+key = "max_percent"
+type = "string"
+label_key = "settings.max_percent.label"
+description_key = "settings.max_percent.description"
+default = "100"
+
+[[setting]]
+key = "colortemp"
+type = "bool"
+label_key = "settings.colortemp.label"
+description_key = "settings.colortemp.description"
+default = false
+
+[[service]]
+id = "als"
+entry = "service.luau"
