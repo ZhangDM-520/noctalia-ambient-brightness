@@ -360,6 +360,11 @@ on the machine:
 | A bare target takes its reading from the key | override `"00030" = "88"` parsed with no complaint; the same run gave `brightness=3 nodes temperature=10 nodes`, i.e. a partial override merges over the manifest default |
 | Both cells are editable in place | settings-page capture, OCR'd: rows render as `02700 -> | 2700:5100` — two separate input fields per row |
 | The padded keys really do order the rows | lexicographic sort of the shipped keys equals numeric order of the parsed nodes (asserted per curve in `tests/curve.test.luau`) |
+| The brightness OSD really does pop for the plugin | timing-independent loop: 3/3 captures showed `65%`. A single fixed-delay capture had given a false negative |
+| `[osd.kinds] brightness = false` silences it | 0/3 with the line, 3/3 with it removed, 0/3 with it re-applied — causation, not correlation |
+| Only the brightness kind is affected | `volume-osd` still showed with the line in place (2/3), so no OSD was left globally suppressed |
+| The config edit is additive and parses | diff vs a `cp -p` backup: 7 added lines, 0 removed; `tomllib` reads `osd.kinds = {'brightness': False}` |
+| The plugin is unaffected | `config: brightness=10 nodes temperature=10 nodes`, `target=70.2` at raw 188, `observations=0`, profile.json absent |
 
 The lesson worth carrying forward: **every one of the four real defects found in
 this work was found by running it, not by reading.** The `pluginDir` function
@@ -607,3 +612,127 @@ could not have shown the answer.
   and the easiest target to paste a learned profile into, but it loses the per-row
   structure entirely.
 - **Keep `string_list`.** Status quo; the owner's actual complaint.
+
+---
+
+## 11. Phase 4 — silencing the brightness OSD
+
+A continuous adapter pops the brightness OSD every time it adapts, so the feature is
+not seamless. The fix turned out to be a config line the plugin cannot write, and
+the investigation is worth recording because two plausible escapes are both closed.
+
+### 11.1 There is one choke point and exactly two gates
+
+`src/shell/osd/osd_overlay.cpp`:
+
+```cpp
+void OsdOverlay::show(const OsdContent& content) {
+  if (m_wayland == nullptr || m_renderContext == nullptr) return;
+  if (!isEnabled()) return;                                                       // gate 1
+  if (m_config != nullptr && !isOsdKindEnabled(m_config->config().osd.kinds, content.kind)) return;  // gate 2
+```
+
+with `case OsdKind::Brightness: return kinds.brightness;`.
+
+| Gate | Lever | Scope | Persistence |
+| --- | --- | --- | --- |
+| 1 | `noctalia msg osd-disable` / `osd-enable` / `osd-toggle` | **all** kinds | runtime only |
+| 2 | `[osd.kinds] brightness = false` | **brightness only** | persistent |
+
+There is no per-kind runtime control and no `osd-reset`. `osd-toggle` flips *and*
+reports, so the current state cannot be read without changing it.
+
+### 11.2 The OSD is driven by a change callback, so no writer escapes it
+
+`src/app/application_services.cpp:1426` wires it:
+
+```cpp
+m_brightnessService->setChangeCallback([this, shouldRefreshControlCenter]() {
+  m_brightnessOsd.onBrightnessChanged(*m_brightnessService);
+```
+
+and `BrightnessOsd::onBrightnessChanged` diffs a snapshot and calls
+`m_overlay->show(...)`. In `brightness_service.cpp` the callback is fired by the
+logind `SetBrightness` path, the direct sysfs writer, the DDC path, **and the inotify
+external-change watcher** (`dispatchWatch`).
+
+So the obvious workaround — "skip Noctalia and write sysfs" — is closed twice:
+
+1. `/sys/class/backlight/amdgpu_bl1/brightness` is `-rw-r--r-- root root`, so a
+   user-space write cannot happen at all.
+2. Even if it could, or via logind, the inotify watcher fires the same callback and
+   pops the same OSD.
+
+`brightness-set` was never the cause. The change callback is, and it fires for every
+writer.
+
+### 11.3 The fix, and why it is not in the plugin
+
+`[osd.kinds] brightness = false` in `~/.local/state/noctalia/settings.toml` — gate 2.
+It is precise, persistent, and silences every writer: the plugin's adaptation, the
+idle `dim` at 50 s, and the `brightnessctl -r` restore on resume. Its cost is the OSD
+on manual brightness keys, which cannot be separated from the plugin's writes because
+the gate is per-kind rather than per-writer.
+
+The plugin cannot apply it — established in §9, plugins read config but cannot write
+it — so the phase is a documented config change plus this record. No module changed.
+
+### 11.4 Rejected: wrapping writes in `osd-disable` … `osd-enable`
+
+Gate 1 is reachable from the plugin, which makes this the tempting option. It is
+rejected because it is **not safely reversible**: `osd-enable` calls
+`setEnabledOverride(true)`, which is not the same as leaving the override *unset*. For
+an owner who has `osd.enabled = false`, "unset" means false and the plugin would force
+OSDs **on**. With no non-destructive read and no `osd-reset`, the plugin cannot
+guarantee it leaves the state it found. A crash between the two calls would also leave
+every OSD dead until the shell restarts.
+
+Recording it here so it is not rediscovered as a good idea.
+
+### 11.5 Verification — and a false negative that had to be caught
+
+A single screenshot at a fixed delay is not evidence. It first appeared that only
+`brightness-osd` popped an OSD while `brightness-set` did not; sampling the same call
+at three delays showed why:
+
+```
+delay=0.15s -> 60%
+delay=0.35s -> 60%
+delay=0.80s -> <none>
+```
+
+The OSD was simply gone before the capture. The method is now timing-independent and
+redundant: alternate the value every 200 ms so every frame is a real change that
+re-shows the OSD, and take **three** captures per case. Two further guards were forced
+by what went wrong while testing:
+
+* **Stale-clipboard guard.** Before each capture the clipboard is overwritten with a
+  text sentinel; if `wl-paste --list-types` does not then show `image/png`, the capture
+  is reported STALE rather than re-reading the previous frame. Without this, case B
+  scored 1/3 on a frame left over from case A — a false "the OSD is still showing".
+* **Screen-off guard.** The machine's idle chain fired mid-test (`suspended: dpms=Off`
+  in the plugin log), so a blank screen is reported distinctly instead of being scored
+  as "no OSD".
+
+| # | Case | Result |
+| --- | --- | --- |
+| A | baseline, no `[osd.kinds]` | **3/3** captures showed `65%` |
+| B | `brightness = false`, after reload | **0/3** |
+| C | line removed again (control) | **3/3** |
+| D | line re-applied (final state) | **0/3** |
+| E | `volume-osd` with the line in place | **2/3** — other kinds unaffected |
+
+A and C positive with B and D negative is causation, not correlation. E proves the
+runtime override was not left stuck off, which is the one way this change could have
+quietly broken every other OSD.
+
+The config edit is additive only — 7 lines inserted, 0 removed, verified by diff
+against a `cp -p` backup — and `tomllib` confirms it still parses.
+`osd.kinds.brightness` was already documented upstream, so no schema change was needed.
+
+### 11.6 The lesson
+
+**A negative from a timing-sensitive capture is not a measurement.** The first result
+looked like good news ("the real path is already silent") and was wrong. The fix is not
+a longer delay — it is making the observation redundant and self-checking, so that a
+miss is reported as a miss.

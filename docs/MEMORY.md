@@ -129,3 +129,50 @@ adapter** — it would start treating the 30 % idle dim as a user preference.
 The brightness keys additionally emit `user-adjusted`. That event is now ignored
 while the session is idle, because the panel is not showing what the owner asked
 for at that moment.
+
+## Silencing an OSD (measured 2026-09-22, Noctalia 5.1.0)
+
+* **Every OSD passes one choke point with two gates**, in `OsdOverlay::show()`:
+  `if (!isEnabled()) return;` (the runtime override set by `noctalia msg osd-disable` /
+  `osd-enable` / `osd-toggle`) and `isOsdKindEnabled(config().osd.kinds, content.kind)`
+  (per-kind config; `OsdKind::Brightness` maps to `kinds.brightness`).
+* **Gate 1 is global; gate 2 is per-kind.** So *"stop the OSD for this one thing"* is only
+  expressible in config, never at runtime. `[osd.kinds] brightness = false` lives in
+  `~/.local/state/noctalia/settings.toml`, beside the `[osd]` cosmetics.
+* **Noctalia's brightness OSD is driven by a change callback, not by the IPC command.**
+  `application_services.cpp` wires `BrightnessService::setChangeCallback` to
+  `BrightnessOsd::onBrightnessChanged`, and the callback fires from the logind path, the
+  sysfs writer, the DDC path **and the inotify external-change watcher**. Consequence:
+  **no writer escapes it.** Bypassing `brightness-set` to write sysfs is doubly futile —
+  the `brightness` file is `-rw-r--r-- root root` (unwritable as a user anyway), and the
+  watcher pops the same OSD.
+* **Never build a save/restore around the OSD override.** `osd-enable` sets the override
+  to *true*, which is not the same as leaving it unset, so a plugin that re-enables would
+  force OSDs on for a user who configured `osd.enabled = false`. There is no `osd-reset`,
+  and `osd-toggle` flips *and* reports, so the state cannot be read non-destructively.
+  A crash mid-pair also leaves every OSD dead until the shell restarts.
+* Useful cross-check that is *not* brightness: `noctalia msg volume-osd <n>` renders the
+  volume OSD, so it proves gate 1 was not left stuck off by a test.
+
+## Measuring a transient UI effect (learned the hard way)
+
+A single screenshot at a fixed delay is **not** evidence, and a negative from one is not a
+measurement. A brightness OSD was invisible at 0.7 s while being clearly present at 0.15 s
+and 0.35 s — which first read as "the real path is already silent" and was wrong.
+
+The method that works, for any transient on-screen effect:
+
+1. **Make it continuous.** Re-trigger so the effect is on screen across the capture. For
+   brightness, alternate the value every 200 ms — a *repeated identical* value triggers no
+   change and therefore no OSD, which silently fakes a negative.
+2. **Take three captures per case**, never one.
+3. **Guard the clipboard.** `niri msg action screenshot-screen` puts the frame on the
+   clipboard, so write a text sentinel with `wl-copy` first and require
+   `wl-paste --list-types` to show `image/png` before trusting the frame. Without this, a
+   missed screenshot silently re-reads the *previous* frame — which scored a false 1/3 on a
+   suppression test here.
+4. **Guard a blank screen.** The idle chain can fire mid-test (`suspended: dpms=Off`); check
+   the capture's mean luminance and report a blank frame distinctly rather than scoring it
+   as "no effect".
+5. **Always include a causation control.** Removing the change and watching the effect
+   return is what separates correlation from cause.

@@ -36,6 +36,10 @@ optional. Without it the adapter cannot tell the idle dim apart from you
 lowering the brightness, and will either fight the dim or record it as your
 preference. See `docs/DESIGN.md` § "The idle handshake".
 
+Then, to stop every adaptation from popping the brightness OSD, see
+[Making it seamless](#making-it-seamless-silencing-the-brightness-osd) below. It is
+a one-line config change, and the plugin cannot make it for you.
+
 ## Settings
 
 Configured in Noctalia's Settings UI, or via
@@ -119,6 +123,42 @@ The profile lives in `profile.json` in the plugin's data directory. The plugin
 **cannot write its own settings** — the Noctalia host does not permit it — so
 promoting a learned value into `curve_brightness` is a manual copy. The fitted
 bands use exactly the node positions you authored, so it is a bar-for-bar paste.
+
+### Making it seamless: silencing the brightness OSD
+
+An adapter that changes brightness continuously will pop Noctalia's brightness OSD
+every time it adapts, which is not seamless. Add this to
+`~/.local/state/noctalia/settings.toml`:
+
+```toml
+[osd.kinds]
+brightness = false
+```
+
+This is the only precise fix, and it is **why** it is in your config rather than in
+the plugin: every OSD passes through a single gate in `OsdOverlay::show()` that
+checks `osd.kinds` per kind, but a plugin cannot write config. The plugin's only
+runtime lever, `noctalia msg osd-disable`, is **global** — it would also kill your
+volume, Wi-Fi, Bluetooth and caffeine OSDs.
+
+Two bonuses worth knowing about:
+
+* It silences the brightness OSD for **every** writer, not just the plugin — so the
+  idle `dim` at 50 s and the `brightnessctl -r` restore on resume stop popping one
+  too.
+* Noctalia's `[osd]` cosmetics in `settings.toml` are known to drive the OSD
+  (this machine renders it at `bottom_center`, not the documented default), so the
+  `[osd.kinds]` table in the same file is read too.
+
+The cost is the OSD when you press the brightness keys yourself: the gate is
+per-kind, not per-writer, so the two cannot be separated. Brightness is the one
+setting where the screen is its own feedback, but it is a real trade.
+
+**Do not try to dodge the OSD by writing sysfs instead.** It cannot work twice
+over: the backlight `brightness` file is `-rw-r--r-- root root`, so a user-space
+write is not possible at all, and Noctalia watches the file with inotify and fires
+the same change callback — which pops the same OSD. `brightness-set` is not the
+problem; the change callback is, and it fires for every writer.
 
 ## Testing
 
