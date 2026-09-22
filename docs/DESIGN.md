@@ -301,6 +301,229 @@ and should be opt-in.
 
 ---
 
+### 6.1 — Temporal behaviour of the adaptation
+
+Research only; no code was changed for this section. Every claim carries a
+confidence level. Anything not measured is marked *unverified* rather than
+argued.
+
+#### How often the plugin actually writes (observed, not estimated)
+
+The tick is 1 Hz (`setUpdateInterval(1000)`, service.luau), but the write gate
+`colortemp.should_apply` demands **both** `|target − applied| ≥ step_k (150 K)`
+**and** `≥ min_interval_s (120 s)` since the last write. The ceiling is
+therefore **0.5 writes per minute**, and each write is one splice + one
+`config-reload` — *high confidence, code path*.
+
+Under a steady room the real rate is lower still. A 12-sample 1 Hz trace of
+`in_colortemp_raw` read 3182–3189 K (7 K spread); through the shipped curve
+that maps to a **1.9 K** target movement — 80× below the 150 K gate, so **zero
+writes** in that minute. The plugin log over the current run contains **zero**
+`colortemp: applied` lines — *measured, high confidence*. The 150 K gate
+doubles as the noise deadband.
+
+#### The largest single step the current curve can command
+
+The temperature path has **no slew** (brightness has `policy.slew`; temperature
+does not — service.luau applies `target_k` whole). Evaluated against the shipped
+14-node curve (`curve.eval` + `clamp_k`, run under luau, not estimated):
+
+| scenario | ambient swing | commanded panel step |
+| --- | --- | --- |
+| torch across this sensor's measured range (2832→4500 K) | 1668 K | **490 K in one write** |
+| any ambient outside the node span (full curve range) | — | up to **1400 K** |
+| custom advanced map at clamp extremes (2500↔6500) | — | up to **4000 K** |
+
+The mechanism snaps all of it in one frame (below), so the perceptual size of a
+fast ambient change equals the full mapped delta — *high confidence, code +
+eval*.
+
+#### Mechanism granularity: reload is an atomic snap, not a ramp
+
+Source: the host tree that built the running binary
+(`.../noctalia-git/src/noctalia`, HEAD `e7acd0654`).
+
+`noctalia msg config-reload` → `ConfigService::forceReload()`
+(config_service.cpp:1839) → `loadAll()` + `fireReloadCallbacks()` →
+`GammaService::reload()` → `apply()` → `applyTarget(kelvin)`, whose own comment
+states *"discrete toggles (enable/force/reload) **snap in a single upload**"*
+(gamma_service.cpp:582). `applyTarget` uploads the whole ramp once and returns;
+there is **no interpolation on the reload path** — *high confidence, source*.
+
+The ramp that does exist — `kRampDuration` 60 min, `kTargetStepKelvin` 50,
+`kMinTickInterval` 2 s — only runs while `computeTarget()` reports
+`transitioning=true`, i.e. while following the **clock-anchored schedule**
+window. In forced mode (`force = true`, which our splice always writes)
+`computeTarget` returns `transitioning=false` immediately, so the ramp timer is
+never armed for us — *high confidence, source*. **Abruptness is ours, not
+Noctalia's: DESIGN §6's claim stands, and the write cadence is the only knob.**
+
+#### Trying to falsify "no runtime setter"
+
+Four routes checked, in order of plausibility:
+
+1. **`noctalia msg` subcommands** — `nightlight-enable/disable/toggle/
+   force-toggle` exist; **no temperature command** exists in `schema_msg.h`.
+   Claim survives — *high confidence*.
+2. **Plugin API** — `docs/plugin-api.json` exposes `noctalia.getSetting(path)`
+   (read-only). No setter. Claim survives — *high confidence*.
+3. **The Settings window's own path** — sliders commit via
+   `ConfigService::setOverride()` → `mutateOverrides()` → write file + `loadAll`
+   + `fireReloadCallbacks()` in-process (config_overrides.cpp:1959). A real
+   runtime setter, but **reachable only inside Noctalia's UI**, not over IPC —
+   *high confidence; claim survives as stated for external writers*.
+4. **inotify — the route the claim misses (falsified).** `setupWatch()`
+   watches the state dir with `IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO |
+   IN_CREATE` (config_service.cpp:54, watch registered at :1092). **Any external
+   write to `settings.toml` triggers `loadOverridesFromFile()` + `loadAll()` +
+   `fireReloadCallbacks()` on its own** — no `config-reload` needed
+   (config_service.cpp:899). Our atomic rename is an `IN_MOVED_TO` event. The
+   `m_ownOverridesWritePending` echo-skip applies only to Noctalia's *own*
+   writes, not ours. So each of our temperature changes likely fires **two**
+   full reload cycles: the inotify one, then the explicit `config-reload` —
+   *high confidence (source), live double-fire **unverified** (Noctalia's log
+   fd points at /dev/null)*. DESIGN's "we must send config-reload" is therefore
+   half-wrong: the splice alone would apply; the msg is belt-and-braces (kept,
+   because relying on inotify silently degrades if the watch fails — the source
+   warns `overrides reload disabled` in that case).
+
+#### Reload cost (measured)
+
+Five timed `noctalia msg config-reload` runs: **0.04–0.05 s wall** each. The
+IPC handler runs `forceReload()` synchronously before answering `ok`, so this
+*includes* `loadAll` + all ~30 reload subscribers — *measured, high confidence*.
+At the current 120 s ceiling that is a ~0.04 % duty cycle; even a 1 s ceiling
+would cost 4–5 %. **Cost alone would permit a far tighter ceiling than 120 s.**
+
+What the reload touches besides gamma: `fireReloadCallbacks()` runs **every**
+subscriber — style, theme, bar, widgets, the settings registry. The registry
+slider comment says values refresh "through the rebuilt registry on the next
+config reload" — so **a reload while Settings is open rebuilds the sheet
+underneath the user** (source-supported, *high confidence*). Whether that reads
+as a visible flash, and whether a reload during another writer's frame tears,
+is **unverified** — it needs a human eye on a GUI session (open question below).
+Gamma itself cannot flash on an unchanged target: `applyTarget` returns early
+when the rounded Kelvin is unchanged, and there is no restore-then-apply
+interleaving on the reload path — *high confidence, source*.
+
+#### The three smoothing options, with real numbers
+
+Notation: N = step size per write, R = rate ceiling, τ = exponential time
+constant. Costs drawn from the measurements above (reload = 40–50 ms; gate =
+150 K / 120 s today; torch step = 490 K).
+
+**(a) Quantised stepping** — move N K toward target per reload.
+- Reload frequency: exactly `1/min_interval`; ceiling R bounds it directly.
+- Visible step: N K, guaranteed.
+- Torch: 490 K gap closes in `⌈490/N⌉` writes — N=150 → 4 writes; N=50 → 10
+  writes spread over `10×interval` seconds.
+- Guards/learning: rides unchanged (temperature already acts only when
+  brightness would; `profile.luau` never learns temperature). The gate's deadband
+  role must be re-homed, or steady-room noise (1.9 K mapped) is harmless anyway
+  at any N ≥ 5 K.
+- Fails when: N chosen too large → still a visible jump; interval too short →
+  settings-sheet rebuild rate becomes annoying if the user has Settings open.
+
+**(b) Exponential smoothing of the target** — `target' += α·(target − target')`,
+τ = 1/α seconds.
+- Reload frequency: one write per interval **while moving**, then silence once
+  within the deadband of the applied value.
+- Visible step: bounded by `Δ·α` per interval early, shrinking geometrically —
+  the smoothest of the three.
+- Torch: follows a lag curve instead of stepping; panel reaches ~63 % of the
+  swing in τ, ~95 % in 3τ. Choosing τ = 30 s turns a 490 K single jump into
+  ~5–8 writes of ≤ ~100 K over ~90 s.
+- Guards/learning: same as (a). Smoothing state must reset when guards suspend
+  adaptation (otherwise the first post-resume write replays stale motion) and
+  when the user drags a slider (target is theirs, not ours).
+- Fails when: ambient oscillates with period ≈ τ around a steep curve segment —
+  the smoother chases both ways; needs the step gate as a deadband to quench
+  it. Also τ too small degenerates to today's behaviour.
+
+**(c) Hysteresis deadband** — write only outside a band around the applied value.
+- Not an alternative: it controls **oscillation**, not step size or frequency.
+  `step_k = 150 K` already *is* a deadband — the current design has (c)
+  built in, which is why the steady room produces zero writes.
+- Alone it does nothing for the torch jump: 490 K is far outside any
+  reasonable band.
+
+**Recommendation: (b) with (a)'s rate ceiling, keeping the existing (c).**
+Smooth the *target* with τ ≈ 30–60 s, quantise writes at N ≈ 50–150 K with an
+interval derived from the measured cost (10–30 s is comfortably affordable at
+40–50 ms/reload; the binding constraint is the settings-sheet rebuild, not
+CPU), and leave the 150 K-equivalent gate as the deadband that stops noise and
+threshold chatter. This converts the worst observed-class step (490 K in one
+frame) into a trail of ≤150 K steps over ~1–2 minutes, at ≤ 4 writes/min —
+still 2.5× *under* today's maximum rate but spread across the transition
+instead of concentrated at its end.
+
+**Boundary conditions where this recommendation fails:**
+
+1. **Settings-open rebuild**: any ceiling tighter than ~10 s multiplies visible
+   settings-sheet rebuilds while the owner has the window open. If the owner
+   reports flicker there, back the ceiling off toward 120 s and accept longer
+   transitions.
+2. **τ vs. oscillating ambient**: ambient swinging across a steep segment with
+   period ≈ τ re-excites every write; the deadband must then grow, which in
+   turn blunts responsiveness. There is a (segment-slope × swing-amplitude)
+   region where no single (τ, N, band) triple is both smooth and quiet.
+3. **Guard churn**: idle/lock/override toggling faster than τ resets the
+   smoother repeatedly — each resume starts a fresh visible trail. Fast
+   day-office patterns (lid open/close) degrade toward today's behaviour.
+4. **inotify double-reload** (if confirmed live): doubling halves the effective
+   ceiling budget per unit cost — conclusions above hold only per *logical*
+   change, not per physical reload.
+5. **Perception untested**: if this panel's owner cannot distinguish 150 K
+   steps at 10 s cadence from a smooth ramp, all of this is complexity for
+   nothing — see open questions.
+
+#### Open questions that need hardware (or a human) to answer
+
+1. **Does a config-reload flash when Settings is open?** Source says the sheet
+   rebuilds; only a GUI session can say whether that reads as a flash or a
+   seamless refresh. *(unverified)*
+2. **Does the inotify path actually double-fire on our splice?** One controlled
+   run — splice *without* the msg, watch the panel and the (currently
+   /dev/null) log — settles it. Touches `settings.toml`, so it needs the
+   owner's go-ahead. *(unverified)*
+3. **What is the perceptual threshold of one step on this panel?** 150 K?
+   50 K? Eye-vs-eye comparison at a fixed ambient. This picks N. *(unverified)*
+4. **Q5 below: does the encoded-space gain land where we think on an HDR
+   panel?** Needs a colorimeter or at least a reference-white comparison shot.
+   *(unverified)*
+5. **A real torch trace at 1 Hz**, not a 12 s steady-room sample: how fast does
+   this sensor's CCT actually move? That numbers the worst-case Δ and therefore
+   τ. *(unverified)*
+6. **Reload latency with Settings open vs closed** — the 40–50 ms figure is
+   for a quiet session; a heavy sheet may cost more. *(unverified)*
+
+#### Q5 — fidelity attribution: mechanism, not mapping
+
+`fillGammaRamp` writes `ramp[i] = mul × (i × scale)` for each channel
+(gamma_service.cpp:229): a **per-channel gain applied uniformly to every entry
+of the identity ramp**. The identity ramp is a straight diagonal precisely
+because a straight line *is* the no-op in the LUT's domain; multiplying it by
+`mul` makes the LUT a pure gain **in that domain** — the compositor's
+gamma-encoded pipeline, not linear light (*high confidence for "gain in LUT
+domain"; the exact pipeline position is niri-side and **unverified***).
+
+Colorimetric consequence: a gain g applied in encoded space corresponds to a
+gain of **g^γ** in linear light (γ ≈ 2.2 class). Because the three channels get
+different g, the *ratios* between channels change non-linearly: the realized
+white point does not sit where the `kelvinToRgb` ratios intended — a
+**chromaticity (hue/saturation) error class plus a brightness error**, growing
+with how far the gains drift from 1.0 (largest at our warm end, where blue is
+scaled hardest). `kelvinToRgb` also clamps its input to 1000–10000 K, so
+extreme commanded values bend further.
+
+**DESIGN §7 should attribute residual fidelity loss to the mechanism**
+(noctalia's encoded-space gain), **not to our mapping** — our curve only
+chooses which K to command; how that K is turned into channel gains is entirely
+`GammaService`'s. On this HDR panel (`hdr mode="on"`) where those LUT entries
+ultimately land is the one *unverified* link in that chain (open question 4).
+
+---
+
 ## 7. Known limitations
 
 - ~~**An override does not survive a plugin restart.**~~ **Resolved in §9.** The

@@ -147,3 +147,46 @@ lockstep. Settings sliders/x/windows unchanged.
 **Verified.** Suite 366 checks 0 failures (was 345; +21 in curve.test:
 anchored eval pins floor 5100 ease-out at 2510 K, ladder rows, ceiling past
 7500 K, + structural with_anchors block); manifest lint + "40 nodes agree" ok.
+
+## Research: §6.1 temporal behaviour of the adaptation (2026-09-22)
+
+**Task.** Research-only report appended to DESIGN.md as §6.1 (no code, docs/
+only), from /tmp/als-brightness-research-prompt.md.
+
+**Measured.**
+- Cadence: 1 Hz tick, gate step_k=150K + min_interval=120s -> hard ceiling
+  0.5 writes/min; steady-room 12-sample 1 Hz trace (3182-3189K) maps to 1.9K
+  target movement -> 0 writes; log has 0 `colortemp: applied` lines this run.
+- Largest single step (evaluated on shipped 14-node curve, luau): torch swing
+  2832->4500K ambient = **490 K in one write** (no slew on temperature path);
+  curve range 1400 K; clamp span 4000 K.
+- Reload cost: 5x timed `noctalia msg config-reload` = 0.04-0.05 s wall,
+  handler runs forceReload() synchronously -> includes all ~30 subscribers.
+
+**Source findings (host e7acd0654).**
+- Reload path snaps atomically: applyTarget comment "discrete toggles
+  (enable/force/reload) snap in a single upload" (gamma_service.cpp:582); the
+  60min/50K/2s ramp only runs in schedule mode, bypassed by force=true (which
+  we always write). Abruptness is our write cadence, not Noctalia's.
+- "No runtime setter" falsification: msg has nightlight enable/disable/toggle/
+  force only; plugin API getSetting read-only; Settings UI setOverride is
+  in-process only -> claim holds for external writers. BUT inotify
+  (config_service.cpp:54/899/1092) watches state dir incl. IN_MOVED_TO: our
+  atomic rename alone triggers loadAll+fireReloadCallbacks -- our splice likely
+  fires TWO reloads (inotify + explicit msg). Live double-fire unverified
+  (noctalia log fd = /dev/null).
+- Q5: fillGammaRamp applies mul x identity ramp = per-channel gain in
+  gamma-ENCODED space -> g in encoded = g^gamma in linear -> chromaticity
+  error class; §7 fidelity loss attributed to mechanism, not our mapping.
+  HDR landing spot unverified.
+
+**Recommendation in §6.1.** (b) exponential smoothing (tau 30-60s) + (a)'s
+rate ceiling (10-30 s affordable at 40-50ms/reload; binding constraint =
+settings-sheet rebuild while Settings open) + keep existing (c) deadband
+(step_k). Converts 490K single jump into <=150K trail over 1-2 min at <=4
+writes/min. 5 failure boundaries stated; 6 open questions flagged for hardware
+(flash on reload w/ Settings open, inotify double-fire, perceptual step
+threshold, HDR colorimeter, real torch trace, reload cost with Settings open).
+
+**Artifacts.** DESIGN.md +§6.1 (~180 lines); this journal entry. No code
+touched; run-tests.sh not required (docs-only) but suite unaffected (366).
