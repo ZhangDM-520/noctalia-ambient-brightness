@@ -336,13 +336,18 @@ label_key = "settings.enabled.label"
 description_key = "settings.enabled.description"
 default = true
 
+# Output to drive: empty = the first output Noctalia reports at start (focused
+# preferred), explicit = that output, validated at start. Discovery runs once, so
+# a change here takes effect on the next plugin restart.
 [[setting]]
 key = "connector"
 type = "string"
 label_key = "settings.connector.label"
 description_key = "settings.connector.description"
-default = "eDP-1"
+default = ""
 
+# Backlight device: empty = first under /sys/class/backlight (sorted), explicit =
+# validated at start against the directory.
 [[setting]]
 key = "backlight"
 type = "string"

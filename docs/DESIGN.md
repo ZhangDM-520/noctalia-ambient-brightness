@@ -2,7 +2,10 @@
 
 Every decision here is traceable to something measured on the target machine
 (ASUS Zenbook S 16 UM5606WA, CachyOS, kernel 7.3.0-rc3, niri 26.04, Noctalia
-5.1.0). Where a measurement corrected the original plan, that is stated
+5.1.0). That machine's concrete paths (`iio:device2`, `card1-eDP-1`, …) appear
+below as *measurement evidence only* — at runtime the plugin discovers each
+machine's devices fresh (§13), so nothing here assumes yours match.
+Where a measurement corrected the original plan, that is stated
 explicitly — the corrections are the most useful part of this document.
 
 Raw evidence, including the probe plugin's run log and the sensor traces, lives
@@ -204,8 +207,8 @@ Full guard set, checked before every write, cheapest first:
 
 | Guard | Source | Note |
 | --- | --- | --- |
-| Panel not `On` | `/sys/class/drm/card1-eDP-1/dpms` | covers the 70 s screen-off |
-| Lid closed | `/proc/acpi/button/lid/LID/state` | see below |
+| Panel not `On` | `/sys/class/drm/card*-{connector}/dpms` (discovered, §13) | covers the 70 s screen-off |
+| Lid closed | `/proc/acpi/button/lid/*/state` (discovered, §13) | see below |
 | Idle engaged | the handshake | covers the ambiguous 50–70 s window |
 | Locked | `noctalia msg status`, polled every 10 s | lock can leave DPMS On |
 | User override | §5 | |
@@ -823,3 +826,45 @@ defaults/windows — and `tests/curve.test.luau` asserts
 Precedence is tested offline (`map_is_custom`: identical, re-formatted, edited x,
 edited y, extra row, dropped row, garbage-only, empty). Suite totals: 41 policy
 + 44 colortemp + 157 curve + 63 profile = **305 checks, 0 failures**.
+
+## 13. Phase 7 — hardware availability: probe before load
+
+The plugin used to *guess* the machine it ran on: `iio:device2`, `card1-eDP-1`,
+`/proc/acpi/button/lid/LID/state`, an `entries[1] or "amdgpu_bl1"` backlight
+fallback, and `/home/zhangdm` when `HOME` was unset. Each was true only on the
+reference machine; anywhere else the service degraded silently (`read or 0`) or
+never adapted at all — a wrong DPMS path in particular meant `policy.guard`
+saw `nil`, which blocks adaptation forever.
+
+Phase 7 moves all of it behind one module, `hardware.luau`:
+
+- **Interface:** `report = hardware.discover(env, opts)` — `env` is injected
+  (`listDir` / `readFile` / `outputs` / `getenv`), `opts` carries the raw
+  `backlight` / `connector` settings. The report carries `paths` (each resolved
+  or nil), `devices` (names for the startup log), `required_missing` and
+  `degraded` (human-readable reason lists).
+- **Seam:** two adapters make it real — the Noctalia environment (service.luau)
+  and a fake machine (tests/hardware.test.luau: 40 checks over 13 machine
+  shapes: no sensor, `in_illuminance_input` fallback, raw-beats-input across
+  devices, no/forced/unreadable backlight, bad connector, no outputs, no lid,
+  no DPMS, no colortemp sensor, unset HOME).
+- **Required vs degraded:** no ambient sensor, no readable backlight, an
+  explicit setting naming hardware this machine lacks, or no output to drive →
+  `required_missing`: one `noctalia.notifyError`, a log line, the service idles
+  and writes nothing, ever. Missing colortemp sensor / DPMS node / lid switch /
+  `HOME` → `degraded`: that feature or guard drops out, adaptation continues.
+  An unavailable guard PASSES rather than blocks (the old nil-DPMS trap).
+- **Discovery runs exactly once, at service start** — before the profile, the
+  curves or the first tick. Re-probing costs CPU for a rare case; the remedy
+  for hotplug or a settings change is toggling the plugin off and on, which the
+  `connector`/`backlight` descriptions state. Both settings resolve inside that
+  one probe: empty = auto (focused output, sorted device list), explicit =
+  validated against `noctalia.outputs()` / the backlight directory.
+- Runtime read failures after a successful probe log once (`warn_once`) and
+  skip the write; zeros never reach the curve.
+
+Verified live (2026-09-22): the probe logs `als=iio:device2 (als)
+backlight=amdgpu_bl1 connector=eDP-1 colortemp=iio:device2 (als)
+dpms=/sys/class/drm/card1-eDP-1/dpms lid=LID` with no degraded entries on the
+reference machine, and a forced `backlight = "not_here"` idles the service with
+the exact reason; restoring it recovers adaptation.

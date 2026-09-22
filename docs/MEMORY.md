@@ -5,19 +5,22 @@ Durable facts about this project. Session-by-session working notes belong in
 
 ## Environment facts this project depends on
 
-- **The ambient light sensor is `iio:device2`, `name = als`** (AMD SFH,
-  `HID-SENSOR-200041`). `lux = in_illuminance_raw / 10`. Reads are **0.03 ms**
+- **On the reference machine the ambient sensor is `iio:device2`, `name = als`**
+  (AMD SFH, `HID-SENSOR-200041`). `lux = in_illuminance_raw / 10`. Reads are **0.03 ms**
   median, so a 1 Hz poll is cheap despite each read being a synchronous
   hub transaction with runtime-PM churn.
 - **The sensor cannot see the panel.** A 100× change in backlight output moved
   the reading by zero counts. Do not design for a feedback loop on this chassis.
-- **`/sys/class/backlight/amdgpu_bl1`: `scale = non-linear`**, which per
+- **On the reference machine `/sys/class/backlight/amdgpu_bl1` has
+  `scale = non-linear`**, which per
   `include/linux/backlight.h` means the value is already perceptually spaced.
-  Never apply a gamma to it. `actual_brightness ≈ max·(req/max)^1.75`.
+  Never apply a gamma to a non-linear device (check `scale` on yours; a linear
+  one does need the perceptual mapping). `actual_brightness ≈ max·(req/max)^1.75`.
 - **`noctalia msg brightness-set <connector> <0..1>`** takes a *fraction*, and
   maps exactly linearly onto `max_brightness`. There is no `brightness-get`.
-- **logind `IdleHint` is never set on this machine** — niri does not propagate
-  idle to logind. Do not try to use it as an idle signal. `/sys/class/drm/*/dpms`
+- **logind `IdleHint` is never set under niri** — niri does not propagate
+  idle to logind (measured on the reference machine; verify on your compositor).
+  Do not try to use it as an idle signal. `/sys/class/drm/*/dpms`
   works but only reflects the 70 s screen-off stage.
 - **`HandleLidSwitch = "suspend"`**, so closing the lid suspends rather than
   giving an occluded-but-awake sensor.
@@ -97,16 +100,18 @@ Durable facts about this project. Session-by-session working notes belong in
   which holds only `config.toml`. Checking the wrong path silently "proves" nothing
   is stored.
 - **`noctalia msg settings-open-plugin <id>`** opens the settings page at a plugin,
-  and `niri msg action screenshot-screen` puts a capture on the **clipboard**
+  and a compositor screenshot (niri: `niri msg action screenshot-screen`) puts a capture
+  on the **clipboard**
   (`wl-paste --type image/png`), which is how the page can be inspected without a
   screenshot tool installed.
 
 ## Project conventions
 
 - All decision logic lives in the **pure** `curve.luau` / `profile.luau` /
-  `policy.luau` / `colortemp.luau` modules; `service.luau` is the only file allowed
-  to touch hardware, the shell or the filesystem. This is what makes 305 checks
-  runnable without a display.
+  `policy.luau` / `colortemp.luau` modules; `service.luau` and `hardware.luau`
+  are the only files allowed to touch hardware, the shell or the filesystem —
+  `hardware.luau` through its injected environment, so a fake machine replaces it
+  in tests. This is what makes 345 checks runnable without a display.
 - **Host slider settings: `type = "int"` with `min`/`max`/`step`** (also `double`);
   the default must lie within [min, max] and `step > 0`. `visible_when = { key,
   values }` gates a control on another setting — the temperature sliders use
@@ -200,3 +205,23 @@ The method that works, for any transient on-screen effect:
    as "no effect".
 5. **Always include a causation control.** Removing the change and watching the effect
    return is what separates correlation from cause.
+
+## Hardware discovery (Phase 7)
+
+- **Never hardcode device paths.** `iio:device2`, `card1-eDP-1`, `LID`,
+  `amdgpu_bl1`, `/home/zhangdm` were all true only on one machine. Every path now
+  comes from `hardware.luau`'s `discover(env, opts)` — one injected-environment
+  interface whose report splits `required_missing` (idle + one notification,
+  write nothing) from `degraded` (drop that feature/guard, keep adapting).
+- **An unavailable guard must PASS, not block.** `policy.guard` blocks unless
+  `dpms == "On"`; a hardcoded wrong path made it read `nil` forever, so the
+  plugin silently never adapted. Missing DPMS/lid now degrade to "guard passes".
+- **Discovery runs once, at start — deliberately.** Re-probing per tick or per
+  config change buys CPU cost for a rare case; the remedy for hotplug or a
+  changed `connector`/`backlight` setting is toggling the plugin off and on
+  (stated in the setting descriptions).
+- **Lua patterns: `-` is a quantifier, not a hyphen.** `("colour-temp"):find("colour-temp")`
+  returns nil (`r-` parses as repetition). Literal needles need
+  `find(needle, 1, true)`.
+- **The `luau` CLI has no `os.exit`** (and no `-e` flag): test suites finish with
+  `error(string.format(...), 0)` when checks fail, matching the other suites.

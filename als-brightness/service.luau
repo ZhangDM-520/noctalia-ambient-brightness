@@ -1,10 +1,12 @@
 --!nonstrict
 -- Noctalia [[service]] entry point for ambient-light adaptive panel brightness.
 --
--- This file is the only place that touches hardware, the shell or the filesystem.
--- All decision logic lives in pure modules, which run under a bare `luau` and are
--- unit-tested offline:
+-- This file and hardware.luau are the only places that touch hardware, the shell
+-- or the filesystem; hardware.luau does it through an injected environment, so a
+-- fake machine can replace it in tests. All decision logic lives in pure modules,
+-- which run under a bare `luau` and are unit-tested offline:
 --
+--   hardware.luau   device discovery: every path the service uses, probed at start
 --   policy.luau     temporal shaping, the override window, the guards
 --   curve.luau      the user-owned mapping curves (PCHIP interpolation)
 --   profile.luau    the learned profile fitted from the owner's overrides
@@ -19,15 +21,16 @@ local policy = require("./policy.luau")
 local curve = require("./curve.luau")
 local colortemp = require("./colortemp.luau")
 local profile = require("./profile.luau")
+local hardware = require("./hardware.luau")
 
--- ── paths ────────────────────────────────────────────────────────────────────
-local ALS_RAW = "/sys/bus/iio/devices/iio:device2/in_illuminance_raw"
-local ALS_CT  = "/sys/bus/iio/devices/iio:device2/in_colortemp_raw"
-local DPMS    = "/sys/class/drm/card1-eDP-1/dpms"
-local LID     = "/proc/acpi/button/lid/LID/state"
-local BL_DIR  = "/sys/class/backlight/"
-local HOME_DIR = noctalia.getenv("HOME") or "/home/zhangdm"
-local SETTINGS_PATH = HOME_DIR .. "/.local/state/noctalia/settings.toml"
+-- ── hardware report ─────────────────────────────────────────────────────────
+-- Every device path is resolved ONCE by hardware.discover() at start (the start
+-- block at the bottom of this file): no path, device number or connector is ever
+-- guessed here. Until the probe runs they are nil, and while a required device is
+-- missing HW_OK stays false and every entry point returns early.
+local ALS_RAW, ALS_CT, DPMS, LID, SETTINGS_PATH
+local HW_OK = false
+local HW  -- the full discovery report
 
 -- ── config ───────────────────────────────────────────────────────────────────
 -- Every reader tolerates the wrong type rather than trusting the stored config,
@@ -107,6 +110,15 @@ local function log(line)
     table.remove(LOG_LINES, 1)
   end
   noctalia.writeFile(LOG_PATH, table.concat(LOG_LINES, "\n") .. "\n")
+end
+
+--- Log a line once per run: runtime read failures repeat every tick, and the log
+--- is a bounded ring buffer, so a repeating line would evict real history.
+local WARNED = {}
+local function warn_once(key, line)
+  if WARNED[key] then return end
+  WARNED[key] = true
+  log(line)
 end
 
 -- ── config-derived state ─────────────────────────────────────────────────────
@@ -260,7 +272,8 @@ local function reload()
   ENABLED = setting_bool("enabled", true)
   COLORTEMP = setting_bool("colortemp", false)
   LEARNING = setting_bool("learning_profile", false)
-  CONNECTOR = setting_string("connector", "eDP-1")
+  -- CONNECTOR comes from the start probe, never from a guess; changing the
+  -- setting takes effect on the next plugin restart (hardware is probed once).
   CFG.min_percent = setting_number("min_percent", 15)
   CFG.max_percent = setting_number("max_percent", 100)
   PROF_CFG_BR = fit_bounds("brightness")
@@ -301,18 +314,8 @@ local function reload()
     tostring(LEARNING), CURVE_SOURCE))
 end
 
--- ── backlight device discovery ───────────────────────────────────────────────
+-- Backlight paths come from the start probe (hardware.discover), never guessed.
 local BL_CUR, BL_MAX
-local function resolve_backlight()
-  local forced = setting_string("backlight", "")
-  local name = forced
-  if name == "" then
-    local entries = noctalia.listDir(BL_DIR) or {}
-    name = entries[1] or "amdgpu_bl1"
-  end
-  BL_CUR = BL_DIR .. name .. "/brightness"
-  BL_MAX = BL_DIR .. name .. "/max_brightness"
-end
 
 -- ── state ────────────────────────────────────────────────────────────────────
 local S = {
@@ -392,6 +395,11 @@ end
 -- sees a half-written file, and the content is spliced as text so the user's
 -- comments and key order survive.
 local function apply_temperature(kelvin, now_s)
+  if SETTINGS_PATH == nil then
+    -- Degraded at the probe (HOME unset): skip, and never guess a path.
+    warn_once("settings-path", "colortemp skipped: no settings path (HOME unset)")
+    return
+  end
   local text = noctalia.readFile(SETTINGS_PATH)
   if text == nil then
     log("colortemp: cannot read " .. SETTINGS_PATH)
@@ -424,6 +432,7 @@ local ticks = 0
 noctalia.setUpdateInterval(1000)
 
 function update()
+  if not HW_OK then return end
   ticks = ticks + 1
   local now_ms = noctalia.nowMs()
   local dt = S.last_ms and (now_ms - S.last_ms) / 1000.0 or 1.0
@@ -442,8 +451,19 @@ function update()
   end
 
   local raw = read_num(ALS_RAW)
+  if raw == nil then
+    -- Probed once at start; a later failure skips the write rather than feeding
+    -- zeros into the curve. Restart the plugin to re-probe the hardware.
+    warn_once("als-read",
+      "ambient read failed at " .. tostring(ALS_RAW) .. "; not writing")
+    return
+  end
   local observed = policy.percent_of(read_num(BL_CUR), read_num(BL_MAX))
-  if raw == nil then return end
+  if observed == nil then
+    warn_once("bl-read",
+      "backlight read failed at " .. tostring(BL_CUR) .. "; not writing")
+    return
+  end
 
   if ticks % 60 == 0 then
     log(string.format("heartbeat raw=%d stab=%s last=%s observed=%s idle=%s locked=%s curve=%s",
@@ -484,8 +504,11 @@ function update()
   end
 
   local ok, reason = policy.guard({
-    dpms = read_str(DPMS),
-    lid_closed = (read_str(LID) or ""):find("closed") ~= nil,
+    -- An unavailable guard PASSES (reported as degraded at start); it never
+    -- blocks adaptation, or a machine without a DPMS node or lid switch would
+    -- never adapt at all.
+    dpms = DPMS == nil and "On" or read_str(DPMS),
+    lid_closed = LID ~= nil and (read_str(LID) or ""):find("closed") ~= nil,
     idle_engaged = S.idle,
     locked = S.locked,
     override_active = override_active,
@@ -542,6 +565,10 @@ end
 -- ~/.config/noctalia/config.toml therefore emits these events (see docs/DESIGN.md,
 -- "idle handshake").
 function onIpc(event, _payload)
+  if not HW_OK then
+    warn_once("ipc-while-down", "ipc event '" .. tostring(event) .. "' ignored: hardware unavailable")
+    return
+  end
   if event == "idle-engaged" then
     S.idle = true
     log("idle engaged")
@@ -585,14 +612,54 @@ end
 
 function onConfigChanged()
   reload()
+  if not HW_OK then
+    log("config changed; hardware still unavailable -- toggle the plugin to re-probe")
+    return
+  end
   log("config changed; curves rebuilt, now using " .. CURVE_SOURCE)
 end
 
 -- ── start ────────────────────────────────────────────────────────────────────
-resolve_backlight()
+-- The probe runs FIRST, before the profile, the curves or any tick: hardware
+-- availability is decided exactly once, here. Nothing below runs when a required
+-- device is missing -- the service idles, says why, and never writes to a panel
+-- it cannot see.
+HW = hardware.discover(
+  { listDir = noctalia.listDir, readFile = noctalia.readFile,
+    outputs = noctalia.outputs, getenv = noctalia.getenv },
+  { backlight = setting_string("backlight", ""),
+    connector = setting_string("connector", "") })
+
+for _, note in ipairs(HW.degraded) do
+  log("hardware degraded: " .. note)
+end
+
+if #HW.required_missing > 0 then
+  for _, reason in ipairs(HW.required_missing) do
+    log("hardware unavailable: " .. reason)
+  end
+  noctalia.notifyError("ALS Brightness: hardware unavailable",
+    table.concat(HW.required_missing, "\n"))
+  log("service idle: nothing will be written; fix the hardware and toggle the plugin to re-probe")
+  return
+end
+HW_OK = true
+
+ALS_RAW, ALS_CT = HW.paths.als_raw, HW.paths.als_ct
+DPMS, LID = HW.paths.dpms, HW.paths.lid
+BL_CUR, BL_MAX = HW.paths.bl_cur, HW.paths.bl_max
+SETTINGS_PATH = HW.paths.settings_path
+CONNECTOR = HW.devices.connector
+
 load_profile()
 reload()
 
+log(string.format("hardware: als=%s backlight=%s connector=%s%s%s%s",
+  tostring(HW.devices.als), tostring(HW.devices.backlight),
+  tostring(HW.devices.connector),
+  HW.devices.colortemp and " colortemp=" .. HW.devices.colortemp or "",
+  HW.paths.dpms ~= nil and " dpms=" .. HW.paths.dpms or "",
+  HW.devices.lid ~= nil and " lid=" .. HW.devices.lid or ""))
 log("service starting: connector=" .. tostring(CONNECTOR)
   .. " brightness=" .. tostring(BL_CUR)
   .. " observations=" .. tostring(#PROF.observations))

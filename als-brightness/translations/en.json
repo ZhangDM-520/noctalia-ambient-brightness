@@ -6,11 +6,11 @@
     },
     "connector": {
       "label": "Output",
-      "description": "Display to drive, e.g. eDP-1."
+      "description": "Empty: auto-detect at start. Restart the plugin after changing."
     },
     "backlight": {
       "label": "Backlight device",
-      "description": "Empty: auto-detect."
+      "description": "Empty: auto-detect at start. Restart the plugin after changing."
     },
     "learning_profile": {
       "label": "Use learned thresholds",

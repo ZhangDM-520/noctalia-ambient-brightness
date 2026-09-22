@@ -13,8 +13,9 @@ defaults.
 
 ## Why a plugin rather than a daemon
 
-On this machine Noctalia already owns brightness: the brightness keys, the OSD,
-`sync_all_monitors` and the per-monitor backlight selection all live there. A
+Noctalia already owns brightness in its own session: the brightness keys, the
+OSD, `sync_all_monitors` and the per-monitor backlight selection all live there.
+A
 separate daemon writing sysfs directly would be a second owner of the same
 thing and would desynchronise the shell's own state. Noctalia's plugin API can
 hold the whole feature — a headless `[[service]]` with a poll loop and direct
@@ -27,7 +28,8 @@ proven on the running host. See `docs/DESIGN.md`.
 ## Install
 
 ```sh
-noctalia msg plugins source add als-brightness path ~/Projects/als-brightness
+git clone https://github.com/ZhangDM-520/noctalia-ambient-brightness
+noctalia msg plugins source add als-brightness path ~/noctalia-ambient-brightness
 noctalia msg plugins enable zhangdm/als-brightness
 ```
 
@@ -39,6 +41,21 @@ preference. See `docs/DESIGN.md` § "The idle handshake".
 Then, to stop every adaptation from popping the brightness OSD, see
 [Making it seamless](#making-it-seamless-silencing-the-brightness-osd) below. It is
 a one-line config change, and the plugin cannot make it for you.
+
+## Hardware
+
+Before anything else runs, the plugin probes the machine once (at service start):
+
+- **Required:** an ambient light sensor (`/sys/bus/iio/devices/iio:deviceN` with
+  `in_illuminance_raw` or `in_illuminance_input`) and a backlight device under
+  `/sys/class/backlight`. If either is missing — or your `backlight`/`connector`
+  setting names hardware this machine does not have — the plugin stays idle,
+  shows one error notification, and writes nothing to the panel.
+- **Optional:** the colour-temp sensor, the DPMS node, the lid switch and `HOME`.
+  Each drops out with a log line if absent (an unavailable guard passes rather
+  than blocks adaptation); everything else keeps working.
+- Discovery runs **once at start**. After plugging in hardware or changing the
+  `connector`/`backlight` settings, toggle the plugin off and on to re-probe.
 
 ## Settings
 
@@ -55,8 +72,8 @@ Configured in Noctalia's Settings UI, or via
 | `curve_brightness` | 10 nodes | **Advanced** (behind `show_advanced`). Power-user override: one row per node, `reading:target`. Edit it and it wins over the sliders. |
 | `curve_temperature` | 10 nodes | **Advanced.** Same shape. |
 | `enabled` | `true` | Master switch. While off the panel is left alone entirely. |
-| `connector` | `eDP-1` | Output to drive. |
-| `backlight` | auto | Backlight device under `/sys/class/backlight`. |
+| `connector` | `""` (auto) | Output to drive; empty = the focused output found at start. Restart to apply. |
+| `backlight` | `""` (auto) | Backlight device under `/sys/class/backlight`; validated at start. Restart to apply. |
 | `min_percent` | `15` | Hard floor, so a dark or occluded reading cannot blank the screen. |
 | `max_percent` | `100` | Hard ceiling. |
 | `colortemp` | `false` | Also warm the panel toward the ambient colour temperature. |
@@ -124,11 +141,12 @@ unverified (a phone torch at point-blank reads only 1665 lux), so the curve is
 defined against counts you can read directly:
 
 ```sh
-cat /sys/bus/iio/devices/iio:device2/in_illuminance_raw
+cat /sys/bus/iio/devices/iio:device*/in_illuminance_raw
 ```
 
 The ten shipped nodes reproduce "25 percentage points per decade of ambient light"
-around the one datum measured on this machine — 185 counts → 70% — which is why a
+around the one datum measured on the reference machine — 185 counts → 70% —
+which is why a
 fresh install behaves sensibly.
 
 ### The learned profile
@@ -176,7 +194,7 @@ Two bonuses worth knowing about:
   idle `dim` at 50 s and the `brightnessctl -r` restore on resume stop popping one
   too.
 * Noctalia's `[osd]` cosmetics in `settings.toml` are known to drive the OSD
-  (this machine renders it at `bottom_center`, not the documented default), so the
+  (the reference machine renders it at `bottom_center`, not the documented default), so the
   `[osd.kinds]` table in the same file is read too.
 
 The cost is the OSD when you press the brightness keys yourself: the gate is

@@ -83,3 +83,24 @@ advanced filter runs *before* `visible_when`, so keeping it would hide the maps
 whenever the global filter is off (unreachable from the sheet). `en.json` +2 keys
 (60 total), 30 settings, declaration order unchanged otherwise.
 `./run-tests.sh`: 305 checks, 0 failures.
+
+## Hardware availability (Phase 7, 2026-09-22)
+
+**Problem.** The service hardcoded `iio:device2`, `card1-eDP-1`, `LID`,
+`amdgpu_bl1` and `/home/zhangdm` — true only on the author's machine — and
+degraded silently (`or 0`) when a path did not exist. A wrong DPMS path blocks
+adaptation forever (`policy.guard` needs `"On"`).
+
+**Fix.** New deep module `als-brightness/hardware.luau`:
+`discover(env, opts) -> report` (paths / devices / required_missing / degraded)
+over an injected environment. service.luau probes FIRST, at start: required
+missing -> one notifyError + log + idle (no panel writes); optional missing ->
+degrade + guard-passes + log. Discovery once at start (user decision: no
+re-probing CPU cost; toggle the plugin to re-probe). `connector` default
+`eDP-1` -> `""` (auto, validated against `noctalia.outputs()`), descriptions
+note "restart after changing".
+
+**Verified.** run-tests.sh 345 checks 0 failures (40 new in
+tests/hardware.test.luau across 13 fake machines); live: full probe report
+logged, forced backlight `not_here` idled with the reason, restore recovered
+adaptation.

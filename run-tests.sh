@@ -22,7 +22,8 @@ echo "--- lint ---"
 # are called by the Noctalia host, so luau-analyze reports them as unused
 # functions. The pure modules have no such excuse.
 luau-analyze als-brightness/policy.luau als-brightness/colortemp.luau \
-  als-brightness/curve.luau als-brightness/profile.luau
+  als-brightness/curve.luau als-brightness/profile.luau \
+  als-brightness/hardware.luau
 
 echo
 echo "--- manifest ---"
@@ -99,3 +100,4 @@ luau tests/policy.test.luau
 luau tests/colortemp.test.luau
 luau tests/curve.test.luau
 luau tests/profile.test.luau
+luau tests/hardware.test.luau
