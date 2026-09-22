@@ -331,7 +331,7 @@ and should be opt-in.
 
 ## 8. Verification status
 
-`./run-tests.sh` — 236 checks, no hardware required, plus `noctalia plugins lint`
+`./run-tests.sh` — 263 checks, no hardware required, plus `noctalia plugins lint`
 and a check that the manifest and code ship the same curve defaults. Verified live
 on the machine:
 
@@ -355,6 +355,11 @@ on the machine:
 | Sparse profile degrades safely | 1 observation → `learned (0/10 bands)`, so the authored curve was used rather than noise |
 | Idle is never learned | `user-adjusted ignored while idle (the dim is not a preference)`, and `profile.json` absent |
 | Temperature curve applies | ambient 3377 K → `colortemp: applied 5296K`. A straight chord would give 5311; the 15 K gap is the flat-run tangent correctly pinned to zero |
+| `string_map` defaults really are served | marker test: manifest node set to `185:25` → `target=25.1` at raw 189. The cached list default would have stayed ≈70 |
+| The value wins over a disagreeing key | `row "16384" is keyed 16384 but its value says x=200; using the value` → `target=80.3`, matching the x=200 node |
+| A bare target takes its reading from the key | override `"00030" = "88"` parsed with no complaint; the same run gave `brightness=3 nodes temperature=10 nodes`, i.e. a partial override merges over the manifest default |
+| Both cells are editable in place | settings-page capture, OCR'd: rows render as `02700 -> | 2700:5100` — two separate input fields per row |
+| The padded keys really do order the rows | lexicographic sort of the shipped keys equals numeric order of the parsed nodes (asserted per curve in `tests/curve.test.luau`) |
 
 The lesson worth carrying forward: **every one of the four real defects found in
 this work was found by running it, not by reading.** The `pluginDir` function
@@ -376,7 +381,9 @@ been convenient.
 - **`string_list` renders as a full list editor.**
   `settings_control_factory.cpp:1164 makeListBlock` wires add, remove, reorder and
   a placeholder. The node list is variable-length by construction, so ten is a
-  default and not a cap.
+  default and not a cap. **Partly superseded by §10:** the editor has no *edit*
+  callback, so this was a good storage model and a poor editing one. The curves are
+  now `string_map` for that reason.
 - **Declaration order is render order.** `manifestSettingSpecs` walks the manifest
   fields in order and `settings_content_plugins.cpp` renders that vector in order,
   so declaring `learning_profile` first literally puts it at the head of the page.
@@ -464,3 +471,139 @@ verified: `user-adjusted ignored while idle (the dim is not a preference)`, with
 
 That makes five defects in this project found by running it rather than by reading
 it.
+
+---
+
+## 10. Phase 3 — the nodes become editable in place
+
+The owner's report was that a curve node *"can only be edited by remove and create
+new"*. That was accurate, and the cause turned out to be outside this plugin.
+
+### 10.1 The root cause is the host's list editor
+
+`ListEditor` (`src/ui/controls/list_editor.{h,cpp}`) exposes exactly three
+callbacks — `setOnAddRequested`, `setOnRemoveRequested`, `setOnMoveRequested`.
+There is **no edit callback**, and `rebuildRows()` renders every item as a read-only
+`ui::label` beside ghost remove/move buttons. So for any `string_list`, in any
+plugin, a value can only be changed by deleting its row and retyping it.
+
+Three consequences worth recording:
+
+- This is a **host-widget gap**, not a defect here, and nothing about the plugin
+  could have worked around it: `string_list` offers no seam for a plugin to inject
+  an edit affordance.
+- Phase 2 chose `string_list` believing reorder-plus-add-plus-remove was a
+  reasonable editing model. It was a reasonable *storage* model and a poor *editing*
+  one; the screenshot below is what settled it.
+- No upstream issue tracks this. The only `list_editor` PR ever filed was
+  *"Don't disable the dropdown on full"* (#4458, merged), so an upstream fix would
+  be new work rather than a +1.
+
+### 10.2 `string_map` is the type that can be edited in place
+
+`SettingsControlFactory::makeStringMapBlock` builds each row as `ui::input` for
+**both** the key and the value, each with `.onSubmit` and
+`.submitOnFocusLoss = true`. Committing is Enter or clicking away. Two measured
+details made this a clean fit:
+
+- **The gate is API level 6** (`kStringMapSettingPluginApiVersion`), and this
+  plugin declares 24, so `string_map` was already available and **no bump was
+  needed**.
+- **Plugin settings get no suggested keys.** `settings_content_plugins.cpp`
+  constructs `StringMapSetting` with only `entries` and two generic placeholders,
+  and `plugin_manifest.cpp` exposes no `suggested` field at all. That is lucky
+  rather than incidental: `addSuggestedRow` renders the key as a read-only label
+  with only the value editable, while `addCustomRow` — the path every row takes
+  when there are no suggestions — makes both editable.
+
+### 10.3 The catch: rows sort by key as text
+
+```cpp
+std::ranges::sort(customKeys);   // and `suggested` is sorted as well
+```
+
+The manifest exposes no field to change this, so numeric keys would render
+`1, 10, 100, 1000, 16384, 185, 2200, 30, 4, 400, 4000` — a curve you cannot read.
+The shipped keys are therefore **zero-padded** (`"00001"`, `"00185"`, `"16384"`),
+which makes lexical order equal numeric order. `tonumber` strips the padding, so no
+arithmetic changed, and `tests/curve.test.luau` asserts the property directly
+rather than trusting it: for each curve, sorting the keys as text must yield the
+same sequence as the nodes sorted numerically.
+
+The residual papercut is honest and documented in the setting's own description: a
+row added with an unpadded key sorts to the bottom. It still applies correctly,
+because `parse_nodes` sorts numerically regardless.
+
+### 10.4 One source of truth between the key and the value
+
+The owner asked for the value to hold the full `"x:y"` node, which means the
+reading appears twice per row. Rather than reject that as redundant, the rule is:
+
+> **The value is the node. The key is a display-order hint.**
+
+| Row | Result |
+| --- | --- |
+| `"00185" = "185:70"` | node at x=185, y=70 — the normal case |
+| `"00185" = "70"` | no colon, so the key supplies x → x=185, y=70 |
+| `"00185" = "200:70"` | value wins → x=200. One log line notes the disagreement; the row may sort oddly, the curve is exactly as typed |
+| `"zzz" = "200:70"` | non-numeric key, still x=200 |
+
+A stale key can therefore never silently move a node, and no row is dropped merely
+for disagreeing. `curve.luau` still accepts a plain `string_list` as well — the
+curve is just a list of numbers, and keeping that path costs nothing while leaving
+every Phase 2 test meaningful.
+
+### 10.5 The trap this migration created in the service
+
+`setting_list` guarded emptiness with `#value > 0`. A `string_map` has **no array
+part**, so `#value` is 0 at any size and that guard would have thrown away every
+curve the GUI produced — silently, falling back to the shipped default, which looks
+like "settings are ignored". It is now `next(value) ~= nil`, and the reasoning is
+recorded at the call site.
+
+### 10.6 What was verified, and what was not
+
+Verified on the machine, in order:
+
+1. The manifest parses and lints clean; the shape is enforced loudly
+   (`string_map default must be a table`, and every value must be a quoted string —
+   an unquoted `185:70` is a hard error, not a silent degrade).
+2. **The host really serves the map default.** Node `185` set to `25` →
+   `target=25.1` at raw 189, where a stale default would have held ≈70. This needed
+   a disable/enable: `config-reload` alone does *not* re-read the manifest.
+3. **The value wins over a disagreeing key**, live: `row "16384" is keyed 16384 but
+   its value says x=200; using the value` → `target=80.3`, matching the x=200 node.
+   The same run, driven from a hand-written `settings.toml` override, gave
+   `brightness=3 nodes temperature=10 nodes` — a partial override merges over the
+   manifest default, and the untouched curve still falls back correctly.
+4. **The rendered page has two fields per row.** Opened via
+   `noctalia msg settings-open-plugin`, captured with niri, and OCR'd: the rows read
+   `02700 -> | 2700:5100`, and the new setting description renders verbatim.
+5. The non-monotone warning fires through the new shape as well
+   (`values are not monotone; using them as written`).
+
+**Not verified directly:** that the two fields accept keystrokes — that rests on the
+`ui::input` construction read from source, on the placeholder translation keys being
+present in the *installed* binary (checked with `grep -a`), and on the host
+honouring a value written to `settings.toml` in exactly the shape the editor writes
+(point 3). It was not exercised with synthetic input events.
+
+**Also corrected:** an earlier check of "is anything stored that a type change would
+orphan?" looked at `~/.config/noctalia/settings.toml`, which does not exist on this
+machine. The real file is `~/.local/state/noctalia/settings.toml`, where
+`[plugin_settings]` holds only `nightwatch75/todo`. The conclusion held — nothing
+was stored, so the migration was free — but it had been reached via a path that
+could not have shown the answer.
+
+### 10.7 Rejected alternatives, recorded
+
+- **Patch Noctalia's `ListEditor`** to add an edit affordance. The correct
+  root-cause fix, and it would repair the settings UI for every plugin. Rejected as
+  the primary because `noctalia-git` is an AUR build: the patch would need
+  re-applying on every update, and the plugin would then depend on a host change.
+  Still worth offering upstream.
+- **One `string` setting holding the whole list**, e.g.
+  `"1:20.8, 30:50.6, 185:70"`. Genuinely editable in place with no ordering problem,
+  and the easiest target to paste a learned profile into, but it loses the per-row
+  structure entirely.
+- **Keep `string_list`.** Status quo; the owner's actual complaint.

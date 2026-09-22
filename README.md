@@ -45,8 +45,8 @@ Configured in Noctalia's Settings UI, or via
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `learning_profile` | `false` | **The head of the settings page.** On: apply the curve learned from your own adjustments. Off: apply the node lists below. Either way the plugin keeps recording. |
-| `curve_brightness` | 10 nodes | One `sensor-counts:percent` node per row. Your brightness curve. |
-| `curve_temperature` | 10 nodes | One `ambient-kelvin:panel-kelvin` node per row. |
+| `curve_brightness` | 10 nodes | Your brightness curve. One row per node; the value is the target percent. Rows are editable in place. |
+| `curve_temperature` | 10 nodes | Your panel-warmth curve. Same shape. |
 | `enabled` | `true` | Master switch. While off the panel is left alone entirely. |
 | `connector` | `eDP-1` | Output to drive. |
 | `backlight` | auto | Backlight device under `/sys/class/backlight`. |
@@ -56,23 +56,39 @@ Configured in Noctalia's Settings UI, or via
 
 ### The curve
 
-The brightness curve is a list of nodes, one per row, written as
-`sensor-counts:percent`:
+Each curve is a **`string_map`**: one row per node, with the reading as the row's
+key and the target as its value.
 
 ```toml
-[plugin_settings."zhangdm/als-brightness"]
-curve_brightness = [
-  "1:20.8", "4:30.7", "10:39.3", "30:50.6", "100:63.4",
-  "185:70", "400:78.3", "1000:88.3", "2200:96.8", "16384:100",
-]
+[plugin_settings."zhangdm/als-brightness".curve_brightness]
+"00001" = "1:20.8"
+"00030" = "30:50.6"
+"00185" = "185:70"
+"16384" = "16384:100"
 ```
 
-The settings UI renders this as a list editor you can add to, remove from and
-reorder, so ten nodes is a starting point rather than a limit. Values *between*
-nodes are joined with a **monotone cubic (PCHIP)**, which is guaranteed not to
-overshoot the two nodes it sits between — so however you move a node, the panel
-stays inside the band you drew. A `#` starts a comment and blank rows are ignored,
-so a half-edited list cannot break anything.
+It is a map rather than a list for one reason: **in-place editing**. Noctalia's
+list editor has no edit callback — its rows are read-only labels with remove and
+move buttons — so a node in a list can only be changed by deleting it and retyping
+it. The map editor renders both cells per row as real inputs, so you edit a node
+where it sits and press Enter (or click away) to commit.
+
+Editing a value, and adding or removing a row, all work in the Settings UI. Two
+habits make it pleasant:
+
+* **Keys are zero-padded** (`"00185"`, not `"185"`). The editor sorts rows by key
+  as text, so the padding is what keeps the curve reading in numeric order down
+  the page. A row you add with an unpadded key still works — it just sorts to the
+  bottom.
+* **The value can be either the target alone or the whole node.** `"70"` takes its
+  reading from the key; `"185:70"` carries its own. The value always wins, so a key
+  that has fallen out of step can never move a node you typed — at worst the row
+  sorts somewhere unexpected, and the plugin logs a line saying so.
+
+Values *between* nodes are joined with a **monotone cubic (PCHIP)**, which is
+guaranteed not to overshoot the two nodes it sits between — so however you move a
+node, the panel stays inside the band you drew. A `#` starts a comment and blank
+cells are ignored, so a half-edited map cannot break anything.
 
 Readings are raw sensor counts, not lux. The sensor's absolute calibration is
 unverified (a phone torch at point-blank reads only 1665 lux), so the curve is
@@ -110,7 +126,7 @@ bands use exactly the node positions you authored, so it is a bar-for-bar paste.
 ./run-tests.sh
 ```
 
-236 checks over the pure decision logic. No hardware, no clock, no shell needed —
+263 checks over the pure decision logic. No hardware, no clock, no shell needed —
 which is the reason all the logic lives in `policy.luau`, `curve.luau`,
 `profile.luau` and `colortemp.luau` rather than in the service entry point.
 

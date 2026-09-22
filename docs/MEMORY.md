@@ -48,10 +48,27 @@ Durable facts about this project. Session-by-session working notes belong in
 - **Settings render in declaration order**, so the first `[[setting]]` block in the
   manifest is the first control on the page. `advanced = true` hides a setting
   behind "show advanced"; `visible_when = { key, values }` gates it conditionally.
-- **`string_list` is ungated and renders as a full list editor** — add, remove,
-  reorder, with a placeholder row. `getConfig` returns it as a Luau array, and an
-  unset `string_list` returns the manifest default rather than nil.
-  `string_map` exists too, but is gated behind a higher `plugin_api`.
+- **`string_list` renders as a list editor with add, remove and move — and no
+  edit.** `ListEditor` has exactly three callbacks (`setOnAddRequested`,
+  `setOnRemoveRequested`, `setOnMoveRequested`) and renders each row as a read-only
+  `ui::label`, so a value can only be changed by deleting the row and retyping it.
+  This is true of **every** `string_list`, in every plugin. `getConfig` returns it
+  as a Luau array, and an unset `string_list` returns the manifest default rather
+  than nil.
+- **`string_map` is the type that can be edited in place.** `makeStringMapBlock`
+  renders each row as `ui::input` for **both** key and value, committing on Enter or
+  focus loss. Gated at `plugin_api >= 6` (`kStringMapSettingPluginApiVersion`), so
+  with this plugin's 24 no bump is needed. Plugin settings get **no suggested
+  keys** — the manifest has no `suggested` field — which is lucky: suggested rows
+  render the key as a read-only label, while unsuggested rows make both editable.
+- **`string_map` rows sort by key as text**, and nothing in the manifest changes
+  that. Zero-pad numeric keys (`"00185"`) so lexical order equals numeric order.
+- A `string_map` manifest default **must be a TOML table** and every value **must be
+  a quoted string**; both are hard manifest errors, not silent degrades. An unquoted
+  `185:70` is rejected.
+- **A `string_map` has no array part**, so `#value` is 0 at any size. Guarding
+  emptiness with `#value > 0` silently discards the whole setting — use
+  `next(value) ~= nil`.
 - **`parseFieldType` silently falls back to `String`** for an unrecognised `type`.
   A typo in a setting's `type` does not error anywhere — it quietly changes the
   control. `noctalia plugins lint` is the only guard, so it runs in `run-tests.sh`.
@@ -61,13 +78,22 @@ Durable facts about this project. Session-by-session working notes belong in
 - **`noctalia msg config-reload` honours a hand edit** to `settings.toml` and fires
   `onConfigChanged`, so a settings change applies live without a restart. (An
   earlier note in `~/docs/MEMORY.md` warned that it overwrites hand edits; measured
-  here, it did not.)
+  here, it did not.) It does **not**, however, re-read `plugin.toml` — a manifest
+  change needs `noctalia msg plugins disable`/`enable` to take effect.
+- Plugin settings are stored `[plugin_settings."author/plugin"]` in
+  **`~/.local/state/noctalia/settings.toml`** — not under `~/.config/noctalia/`,
+  which holds only `config.toml`. Checking the wrong path silently "proves" nothing
+  is stored.
+- **`noctalia msg settings-open-plugin <id>`** opens the settings page at a plugin,
+  and `niri msg action screenshot-screen` puts a capture on the **clipboard**
+  (`wl-paste --type image/png`), which is how the page can be inspected without a
+  screenshot tool installed.
 
 ## Project conventions
 
 - All decision logic lives in the **pure** `curve.luau` / `profile.luau` /
   `policy.luau` / `colortemp.luau` modules; `service.luau` is the only file allowed
-  to touch hardware, the shell or the filesystem. This is what makes 236 checks
+  to touch hardware, the shell or the filesystem. This is what makes 263 checks
   runnable without a display.
 - **The curve has exactly one implementation.** Phase 2 deleted two
   (`policy.percent_for_raw`, `colortemp.panel_k`) rather than leave them beside the
@@ -77,7 +103,10 @@ Durable facts about this project. Session-by-session working notes belong in
   `tests/curve.test.luau`; a global-range check is too weak and was measured
   passing a curve that overshot by 5.93 points.
 - **The manifest defaults and the code defaults must agree**, or the number the
-  settings page shows is not the number in use. `run-tests.sh` diffs them.
+  settings page shows is not the number in use. `run-tests.sh` diffs them — and
+  diffs the **keys** as well as the values, because the editor sorts rows by key as
+  text, so a key that loses its zero-padding reorders the curve on screen without
+  changing a single number.
 - **Nothing may be learned while the session is idle.** The 30 % idle dim is
   authored policy, not a preference; both the tick and the `onIpc` handler check
   `S.idle` before recording an observation.

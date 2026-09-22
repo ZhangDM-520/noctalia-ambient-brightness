@@ -52,11 +52,19 @@ local function setting_string(key, fallback)
   return fallback
 end
 
---- A `string_list` arrives as a Luau array. A bare string is accepted as a one-row
---- list, so a hand-edited config cannot silently disable a whole curve.
-local function setting_list(key, fallback)
+--- The curves arrive as a `string_map` (the in-place-editable shape) or as a
+--- `string_list`. A bare string is accepted as a one-row list, so a hand-edited
+--- config cannot silently disable a whole curve.
+---
+--- The emptiness test is `next()`, not `#value`: a map keyed "00185" has no integer
+--- keys, so `#value` is 0 for a map of any size and an `#value > 0` guard would
+--- throw away every curve the GUI produced.
+local function setting_nodes(key, fallback)
   local value = noctalia.getConfig(key)
-  if type(value) == "table" and #value > 0 then return value end
+  if type(value) == "table" then
+    if next(value) ~= nil then return value end
+    return fallback
+  end
   if type(value) == "string" and value ~= "" then return { value } end
   return fallback
 end
@@ -166,7 +174,7 @@ local function rebuild_active()
 end
 
 local function load_curve(key, fallback, map_x)
-  local items = setting_list(key, fallback)
+  local items = setting_nodes(key, fallback)
   local nodes, problems = curve.parse_nodes(items, { map_x = map_x })
   for _, problem in ipairs(problems) do
     log("curve " .. key .. ": " .. problem)

@@ -107,6 +107,130 @@ do
   check("  ...and leaves y alone", nodes[1].y, 70)
 end
 
+-- ── the string_map shape ─────────────────────────────────────────────────────
+-- The curves are `string_map` because ListEditor (behind `string_list`) has no
+-- edit callback, so a list node can only be changed by deleting and retyping it.
+-- These tests pin the map semantics, including the two traps that come with it:
+-- a map has no array part (`#value` is 0 at any size), and the host sorts rows by
+-- key as *text*, which is why the shipped keys are zero-padded.
+
+do
+  -- A map and the equivalent list must produce the same curve, or switching the
+  -- setting type would have been a silent behaviour change.
+  local from_map, map_problems = curve.parse_nodes({
+    ["00001"] = "1:20",
+    ["00010"] = "10:30",
+    ["00185"] = "185:70",
+  })
+  local from_list = curve.parse_nodes({ "1:20", "10:30", "185:70" })
+  check("a map yields the same node count as the list", #from_map, #from_list)
+  check("a clean map reports no problems", #map_problems, 0)
+  local same = true
+  for i = 1, #from_map do
+    if from_map[i].x ~= from_list[i].x or from_map[i].y ~= from_list[i].y then same = false end
+  end
+  check_true("a map yields the same nodes in the same order as the list", same)
+end
+
+do
+  -- A map has no integer keys, so `#value` is 0 however many rows it holds. A
+  -- guard written as `#value > 0` would therefore throw the whole curve away.
+  local map = { ["00185"] = "185:70", ["00100"] = "100:63.4" }
+  check("a map has no array part", #map, 0)
+  local nodes = curve.parse_nodes(map)
+  check("  ...and is still read in full", #nodes, 2)
+end
+
+do
+  -- The documented shorthand: the value is just the target and the key supplies
+  -- the reading. This is what makes a bare "70" in a row usable.
+  local nodes, problems = curve.parse_nodes({ ["00185"] = "70" })
+  check("a bare target takes x from the key", nodes[1].x, 185)
+  check("  ...and y from the value", nodes[1].y, 70)
+  check("  ...with no complaint", #problems, 0)
+end
+
+do
+  -- The value is authoritative. A stale key must not be able to move a node the
+  -- owner typed: it may only reorder the row on screen, and it says so once.
+  local nodes, problems = curve.parse_nodes({ ["00185"] = "200:70" })
+  check("a disagreeing key does not override the value's x", nodes[1].x, 200)
+  check("  ...the target is still honoured", nodes[1].y, 70)
+  check("  ...and it is reported once", #problems, 1)
+  check_true("  ...saying the row is keyed differently", problems[1]:find("keyed") ~= nil)
+end
+
+do
+  -- A key is an ordering hint, not an input: a non-numeric one is harmless as long
+  -- as the value carries the node.
+  local nodes, problems = curve.parse_nodes({ ["the bright one"] = "200:70" })
+  check("a non-numeric key still yields its node", nodes[1].x, 200)
+  check("  ...without a problem", #problems, 0)
+  -- ...but with nothing else to go on, a row cannot invent a reading.
+  local none, problems2 = curve.parse_nodes({ ["the bright one"] = "70" })
+  check("a non-numeric key and a bare target yield nothing", #none, 0)
+  check("  ...and are reported", #problems2, 1)
+end
+
+do
+  -- Row labels follow the order the settings page renders, so a log line points at
+  -- the row the owner is looking at.
+  local _, problems = curve.parse_nodes({ ["00030"] = "nonsense", ["00010"] = "also bad" })
+  check("both bad rows are reported", #problems, 2)
+  check_true("the first names the lexicographically first row",
+    problems[1]:find("00010", 1, true) ~= nil)
+end
+
+do
+  -- An empty map and a map of blanks are both "not filled in yet", not errors.
+  local empty, p1 = curve.parse_nodes({})
+  check("an empty map yields no nodes", #empty, 0)
+  check("  ...and no problems", #p1, 0)
+  local blank, p2 = curve.parse_nodes({ ["00185"] = "", ["00100"] = "   " })
+  check("blank values are skipped", #blank, 0)
+  check("  ...without being reported", #p2, 0)
+end
+
+do
+  -- The property the zero-padding exists for: the host sorts keys as text, so
+  -- lexical order must equal numeric order or the curve reads scrambled on screen.
+  -- A key that loses its padding breaks this silently and changes no numbers.
+  local keys = {}
+  for k in pairs(curve.DEFAULT_BRIGHTNESS) do keys[#keys + 1] = k end
+  table.sort(keys) -- exactly what makeStringMapBlock does
+  local nodes = curve.parse_nodes(curve.DEFAULT_BRIGHTNESS)
+  check("the default brightness map has 10 rows", #keys, 10)
+  local in_order = true
+  for i = 1, #keys do
+    if tonumber(keys[i]) ~= nodes[i].x then in_order = false end
+  end
+  check_true("lexical key order equals numeric curve order (brightness)", in_order)
+end
+
+do
+  local keys = {}
+  for k in pairs(curve.DEFAULT_TEMPERATURE) do keys[#keys + 1] = k end
+  table.sort(keys)
+  local nodes = curve.parse_nodes(curve.DEFAULT_TEMPERATURE)
+  check("the default temperature map has 10 rows", #keys, 10)
+  local in_order = true
+  for i = 1, #keys do
+    if tonumber(keys[i]) ~= nodes[i].x then in_order = false end
+  end
+  check_true("lexical key order equals numeric curve order (temperature)", in_order)
+end
+
+do
+  -- The shipped keys must be strings: the manifest rejects a non-string value, but
+  -- a numeric-looking key is worth pinning too, because that is what the padding
+  -- makes them look like.
+  local all_strings = true
+  for k, v in pairs(curve.DEFAULT_BRIGHTNESS) do
+    if type(k) ~= "string" or type(v) ~= "string" then all_strings = false end
+  end
+  check_true("every default key and value is a string", all_strings)
+end
+
 -- ── compile ──────────────────────────────────────────────────────────────────
 
 do

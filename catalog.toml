@@ -7,7 +7,7 @@
 [[plugin]]
 id = "zhangdm/als-brightness"
 name = "ALS Brightness"
-version = "0.2.0"
+version = "0.3.0"
 updated_at = 1790050000
 added_at = 1790045000
 author = "zhangdm"

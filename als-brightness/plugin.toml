@@ -1,6 +1,6 @@
 id = "zhangdm/als-brightness"
 name = "ALS Brightness"
-version = "0.2.0"
+version = "0.3.0"
 # Cumulative API levels. 23 = async-file-read, 24 = direct-argv. Both are used:
 # the service reads sysfs (sync readFile, measured at 0.03 ms, so the async path
 # is not needed here) and launches `noctalia msg` with an argv table rather than
@@ -24,48 +24,65 @@ default = false
 
 # The curves.
 #
-# A `string_list` renders as a list editor with add, remove and reorder, so the ten
-# entries below are a starting point rather than a limit: add a node to shape the
-# curve more tightly, or delete one to smooth it out.
+# These are `string_map` rather than `string_list` on purpose. ListEditor -- the
+# widget behind `string_list` -- has no edit callback at all: its only handlers are
+# add, remove and move, and each row renders as a read-only label. So a node in a
+# `string_list` can only ever be changed by deleting it and retyping it. The
+# `string_map` editor renders every row as two real inputs that commit on Enter or
+# on focus loss, which is what makes a node editable in place.
 #
-# Each entry is "x:y". A '#' starts a comment and blank rows are ignored, so a
-# half-edited list can never take the service down.
+# The cost is that the editor sorts rows by key as *text*, and the host offers no
+# field to change that. The keys below are therefore zero-padded so that lexical
+# order and numeric order agree, and the curve reads down the page in order.
+#
+# A node is "reading:target". The reading is the raw sensor count for brightness
+# and the ambient kelvin for temperature. Two spellings both work, so the map can
+# be edited without having to keep the key in step:
+#
+#   "00185" = "185:70"   the value carries the whole node
+#   "00185" = "70"       the value is just the target; the key supplies the reading
+#
+# The value always wins. A key that disagrees with its value costs one log line
+# and the row sorts where the key puts it, but the curve is exactly what was typed.
+#
+# A '#' starts a comment and blank rows are ignored, so a half-edited map can never
+# take the service down.
 
 [[setting]]
 key = "curve_brightness"
-type = "string_list"
+type = "string_map"
 label_key = "settings.curve_brightness.label"
 description_key = "settings.curve_brightness.description"
-default = [
-  "1:20.8",
-  "4:30.7",
-  "10:39.3",
-  "30:50.6",
-  "100:63.4",
-  "185:70",
-  "400:78.3",
-  "1000:88.3",
-  "2200:96.8",
-  "16384:100",
-]
+
+[setting.default]
+"00001" = "1:20.8"
+"00004" = "4:30.7"
+"00010" = "10:39.3"
+"00030" = "30:50.6"
+"00100" = "100:63.4"
+"00185" = "185:70"
+"00400" = "400:78.3"
+"01000" = "1000:88.3"
+"02200" = "2200:96.8"
+"16384" = "16384:100"
 
 [[setting]]
 key = "curve_temperature"
-type = "string_list"
+type = "string_map"
 label_key = "settings.curve_temperature.label"
 description_key = "settings.curve_temperature.description"
-default = [
-  "2500:5100",
-  "2700:5100",
-  "3000:5100",
-  "3500:5380",
-  "4000:5660",
-  "4500:5940",
-  "5000:6220",
-  "5500:6500",
-  "6000:6500",
-  "6500:6500",
-]
+
+[setting.default]
+"02500" = "2500:5100"
+"02700" = "2700:5100"
+"03000" = "3000:5100"
+"03500" = "3500:5380"
+"04000" = "4000:5660"
+"04500" = "4500:5940"
+"05000" = "5000:6220"
+"05500" = "5500:6500"
+"06000" = "6000:6500"
+"06500" = "6500:6500"
 
 [[setting]]
 key = "enabled"

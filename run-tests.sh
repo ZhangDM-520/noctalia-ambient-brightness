@@ -39,8 +39,12 @@ fi
 echo
 echo "--- curve defaults agree ---"
 # The manifest default (what the settings page shows) and the code default (what
-# the service falls back to) must be the same list. Nothing else checks this, and a
+# the service falls back to) must be the same table. Nothing else checks this, and a
 # silent divergence would mean the number you can see is not the number in use.
+#
+# The keys are compared too, not just the values: the editor sorts rows as text, so
+# a key that stops being zero-padded reorders the curve on screen without changing
+# a single number.
 tmp_manifest="$(mktemp)"
 tmp_code="$(mktemp)"
 python3 - als-brightness/plugin.toml >"$tmp_manifest" <<'PY'
@@ -48,9 +52,9 @@ import sys, tomllib
 with open(sys.argv[1], "rb") as fh:
     manifest = tomllib.load(fh)
 for setting in manifest["setting"]:
-    if setting.get("type") == "string_list":
-        for node in setting["default"]:
-            print(f"{setting['key']}\t{node}")
+    if setting.get("type") == "string_map":
+        for key, value in sorted(setting["default"].items()):
+            print(f"{setting['key']}\t{key}\t{value}")
 PY
 luau tests/print-defaults.luau >"$tmp_code"
 if diff -u "$tmp_manifest" "$tmp_code" >/dev/null; then
