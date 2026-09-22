@@ -111,6 +111,11 @@ capability above was proven.
 
 ## 3. The curve, and what "calibration" means here
 
+> **Partly superseded by §9.** The domain reasoning below still holds, and the
+> shipped default nodes are built from it — but the anchor table is no longer
+> hard-coded. Since Phase 2 the curve is a list of nodes the owner edits. Read this
+> section for *why* the mapping has the shape it does; read §9 for where it lives.
+
 The value written is a percentage, which is already perceptual (§1). So:
 
 1. compress the ambient reading **logarithmically** (`log10(raw + 1)`);
@@ -295,13 +300,17 @@ and should be opt-in.
 
 ## 7. Known limitations
 
-- **An override does not survive a plugin restart.** State is in memory, so
-  editing a setting re-reads the panel's current brightness as the baseline and
-  adaptation resumes from there. Self-correcting, mildly surprising.
-- **Override expiry is a band or a timer, not learning.** wluma folds a manual
+- ~~**An override does not survive a plugin restart.**~~ **Resolved in §9.** The
+  override *window* is still in memory, but every override is now recorded as an
+  observation in `profile.json`, which does survive a restart. Editing a setting
+  re-reads the panel's current brightness as the baseline and adaptation resumes
+  from there — self-correcting, mildly surprising.
+- **Override expiry is a band or a timer, not learning.** ~~wluma folds a manual
   change into its model permanently; here the manual value expires once the
-  lighting changes materially or after 300 s. Simpler, and never fights, but it
-  will not remember a preference across days.
+  lighting changes materially or after 300 s.~~ **Partly resolved in §9.** The
+  window still expires on the band or the 300 s timer, exactly as designed — but
+  the observation itself is retained, and with `learning_profile` on it is applied
+  as a fitted curve rather than forgotten.
 - **Absolute lux is not trustworthy** on this sensor, which is why the curve is
   anchored in raw counts (§3).
 - **HDR is unaddressed, by everyone.** This panel runs `hdr mode="on"
@@ -322,7 +331,9 @@ and should be opt-in.
 
 ## 8. Verification status
 
-`./run-tests.sh` — 92 checks, no hardware required. Verified live on the machine:
+`./run-tests.sh` — 236 checks, no hardware required, plus `noctalia plugins lint`
+and a check that the manifest and code ship the same curve defaults. Verified live
+on the machine:
 
 | Behaviour | Evidence |
 | --- | --- |
@@ -335,9 +346,121 @@ and should be opt-in.
 | DPMS guard | `suspended: dpms=Off` → `resumed: adapting` |
 | Keybinding override | `user override via keybinding` |
 | Colour temperature | ambient 3394 K → 5312 K; `settings.toml` spliced in place with the following `[notifications]` section intact; merged config confirmed |
+| Manifest defaults really are served | marker test: manifest node set to `185:45` → `target=45.0`. Had `getConfig` returned nil and the code fallback been used, it would have stayed 70 |
+| Non-monotone nodes honoured, not rewritten | `curve curve_brightness: values are not monotone; using them as written`, and the curve still applied |
+| Learning records with the toggle **off** | `learning=false`, manual 55 % → `profile.json` written with the observation, `source=authored` unchanged |
+| Learned curve applied | restart → `source=learned (1/10 bands)` → `target=42.5` = median(55, 30) for that band |
+| Profile survives a restart | `observations=2` after disable/enable, loaded before the first write |
+| A settings change applies live | `learning_profile=true` + `config-reload` → `config changed; curves rebuilt, now using learned (0/10 bands)`, no restart |
+| Sparse profile degrades safely | 1 observation → `learned (0/10 bands)`, so the authored curve was used rather than noise |
+| Idle is never learned | `user-adjusted ignored while idle (the dim is not a preference)`, and `profile.json` absent |
+| Temperature curve applies | ambient 3377 K → `colortemp: applied 5296K`. A straight chord would give 5311; the 15 K gap is the flat-run tangent correctly pinned to zero |
 
 The lesson worth carrying forward: **every one of the four real defects found in
 this work was found by running it, not by reading.** The `pluginDir` function
 call, the seconds/milliseconds mix, the override re-recording, and the splice
 index shift were all invisible to inspection and all caught immediately by a
 test.
+
+## 9. Phase 2 — the curve belongs to the owner, and the learning has somewhere to live
+
+Both changes are shaped by what the host actually permits, not by what would have
+been convenient.
+
+### 9.1 What the host permits (measured)
+
+- **`string_list` is a real, ungated setting type.** `plugin_manifest.cpp`
+  recognises `string`, `string_list`, `string_map`, `bool`, `int`, `double`,
+  `select`, `file`, `folder`, `glyph`, `color`. `string_list` needs no
+  `plugin_api` bump, and `getConfig` returns it as a Luau array.
+- **`string_list` renders as a full list editor.**
+  `settings_control_factory.cpp:1164 makeListBlock` wires add, remove, reorder and
+  a placeholder. The node list is variable-length by construction, so ten is a
+  default and not a cap.
+- **Declaration order is render order.** `manifestSettingSpecs` walks the manifest
+  fields in order and `settings_content_plugins.cpp` renders that vector in order,
+  so declaring `learning_profile` first literally puts it at the head of the page.
+- **Plugins read config but cannot write it.** Upstream: *"plugins read config but
+  cannot write it."* The whole learning design bends around this — it is why the
+  profile is a file the owner copies from, rather than a self-tuning curve.
+- **`parseFieldType` falls back to `String` for an unknown type.** A typo in a
+  setting `type` does not error anywhere; it silently becomes a text box. Hence
+  `noctalia plugins lint` in `run-tests.sh`.
+
+### 9.2 The curve: PCHIP, not a line and not a naive cubic
+
+Ten sparse nodes joined with straight lines leave a derivative discontinuity at
+every node, so the *rate* of adaptation jumps as the ambient crosses one. A naive
+cubic removes that but **overshoots** — which on this curve means commanding over
+100 % or below the floor, i.e. leaving the band the owner drew.
+
+Fritsch–Carlson monotone cubic Hermite (PCHIP) does neither: weighted-harmonic-mean
+interior tangents, zero tangents where the secants change sign, one-sided endpoint
+differences. A monotone node list therefore produces a monotone curve, so
+`min_percent`/`max_percent` are satisfied by construction rather than by clamping,
+and the construction is local, so one node cannot ripple into its neighbours.
+
+**The guarantee is asserted, and the assertion was checked for teeth.** An honest
+naive-cubic variant (Catmull-Rom tangents, no sign guard) measured against the same
+per-interval sweep:
+
+| Node set | PCHIP | naive cubic |
+| --- | --- | --- |
+| flat run beside a steep climb | 0.000000 | **5.93** points outside the band, between two 10 % nodes |
+| non-monotone (`50, 80, 20, 60`) | 0.000000 | 0.65 points outside |
+| the shipped default curve | 0.000000 | **5.13** points outside, at raw ≈ 7413 — about 105 % |
+
+The first row is why the test is **per interval**: that excursion never exceeds the
+set's global maximum of 95 %, so a global-range check passes it. The original
+version of this test *was* that weaker check, and was rewritten after the naive
+cubic slipped through.
+
+### 9.3 The learned profile
+
+`learning_profile` gates **application, never recording**:
+
+| Toggle | Curve applied | Recording |
+| --- | --- | --- |
+| on | fitted from `profile.json` | continues |
+| off (default) | the authored node lists | continues |
+
+Recording while off is the point of the design: switching the toggle on later
+reveals a profile that has been developing rather than an empty file.
+
+- Observations reuse the shape the override already builds (`{raw, percent, at}`),
+  recorded in the curve's own domain so the fit lays straight onto the authored x
+  positions.
+- Each band takes the **median** of its observations, not the mean, because this
+  sensor moves ±10000 counts within one 50 ms sample. A band with fewer than
+  **two** observations falls back to the authored node, so a sparse profile
+  degrades into the shipped curve rather than into noise.
+- `profile.json` is loaded through `profile.sanitise`, because it is a file the
+  owner can open and corrupt and it is read at plugin start. Every field is
+  validated and anything unusable is dropped rather than trusted.
+- The window is capped at 512 observations, newest kept.
+
+Since the plugin cannot write config, promoting a learned value into the curve is a
+manual copy — but the fitted x positions are exactly the authored ones, so it is a
+bar-for-bar paste.
+
+### 9.4 One curve, one implementation
+
+`policy.percent_for_log`/`percent_for_raw` and `colortemp.panel_k` were **removed**
+rather than left sitting alongside the new module. Two implementations of one curve
+drift apart, and a duplicated test suite lets them drift while both stay green.
+Their behaviour survives in the shipped default node lists, and
+`tests/curve.test.luau` asserts the brightness default tracks the old formula to
+within 1.5 points across the operating range.
+
+### 9.5 A defect this phase found on hardware
+
+`user-adjusted` recorded **the idle dim as a preference**. During verification the
+session went idle, the 50 s dim drove the panel to 30 %, and an injected
+`user-adjusted` event filed 30 % as a learned value — precisely the mistake the
+idle handshake exists to prevent, arriving through the one code path that did not
+check `S.idle`. The handler now ignores the event while idle, and the fix is
+verified: `user-adjusted ignored while idle (the dim is not a preference)`, with no
+`profile.json` written.
+
+That makes five defects in this project found by running it rather than by reading
+it.

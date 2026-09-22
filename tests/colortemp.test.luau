@@ -30,25 +30,24 @@ end
 
 local cfg = ct.MAP_DEFAULTS
 
--- ── the ambient -> panel mapping ────────────────────────────────────────────
-check("warm anchor maps to the owner's 5100 K preference",
-  ct.panel_k(3000, cfg), 5100)
-check("cool anchor is neutral", ct.panel_k(5500, cfg), 6500)
-check("midpoint interpolates", ct.panel_k(4250, cfg), 5800)
-check("below the warm anchor clamps", ct.panel_k(1000, cfg), 5100)
-check("above the cool anchor clamps", ct.panel_k(9000, cfg), 6500)
-check("the measured room (~3400 K) sits near the warm end",
-  ct.panel_k(3400, cfg), 5324)
--- monotonic
-do
-  local prev, mono = -1, true
-  for k = 1000, 9000, 137 do
-    local v = ct.panel_k(k, cfg)
-    if v < prev - 1e-9 then mono = false end
-    prev = v
-  end
-  check_true("mapping is monotonic non-decreasing", mono)
-end
+-- ── the ambient -> panel mapping moved ──────────────────────────────────────
+-- The mapping is now the `curve_temperature` setting, evaluated by curve.luau and
+-- covered by tests/curve.test.luau. That suite asserts the default node list
+-- reproduces the old two-anchor ramp (flat 5100 K below a 3000 K room, linear to
+-- 6500 K at 5500 K, flat above), so the behaviour that used to be pinned here is
+-- still pinned -- just once, in one place.
+--
+-- What remains here is the guard rail. The curve supplies the shape; the clamp
+-- stops an over-eager node from commanding a temperature the panel has no gamma
+-- table for.
+check("a sane value passes straight through the clamp", ct.clamp_k(5100, cfg), 5100)
+check("below the floor clamps up", ct.clamp_k(100, cfg), 2500)
+check("exactly at the floor is untouched", ct.clamp_k(2500, cfg), 2500)
+check("above the ceiling clamps down", ct.clamp_k(9000, cfg), 6500)
+check("exactly at the ceiling is untouched", ct.clamp_k(6500, cfg), 6500)
+check("nil clamps to nil, not to a temperature", ct.clamp_k(nil, cfg), nil)
+check("the floor is warm, so a clamp can warm but never over-warm", cfg.min_k, 2500)
+check("the ceiling is neutral, so a clamp can never warm by accident", cfg.max_k, 6500)
 
 -- ── when to rewrite the config ──────────────────────────────────────────────
 check_true("nothing applied yet is always worth applying",

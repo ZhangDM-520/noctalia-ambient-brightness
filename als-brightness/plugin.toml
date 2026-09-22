@@ -1,6 +1,6 @@
 id = "zhangdm/als-brightness"
 name = "ALS Brightness"
-version = "0.1.0"
+version = "0.2.0"
 # Cumulative API levels. 23 = async-file-read, 24 = direct-argv. Both are used:
 # the service reads sysfs (sync readFile, measured at 0.03 ms, so the async path
 # is not needed here) and launches `noctalia msg` with an argv table rather than
@@ -12,6 +12,60 @@ icon = "sun"
 description = "Adapts panel brightness to the ambient light sensor, and hands control back the moment you touch the brightness keys."
 dependencies = ["noctalia"]
 tags = ["hardware", "display", "system"]
+
+# Settings render in declaration order, so this first block is the head of the page.
+
+[[setting]]
+key = "learning_profile"
+type = "bool"
+label_key = "settings.learning_profile.label"
+description_key = "settings.learning_profile.description"
+default = false
+
+# The curves.
+#
+# A `string_list` renders as a list editor with add, remove and reorder, so the ten
+# entries below are a starting point rather than a limit: add a node to shape the
+# curve more tightly, or delete one to smooth it out.
+#
+# Each entry is "x:y". A '#' starts a comment and blank rows are ignored, so a
+# half-edited list can never take the service down.
+
+[[setting]]
+key = "curve_brightness"
+type = "string_list"
+label_key = "settings.curve_brightness.label"
+description_key = "settings.curve_brightness.description"
+default = [
+  "1:20.8",
+  "4:30.7",
+  "10:39.3",
+  "30:50.6",
+  "100:63.4",
+  "185:70",
+  "400:78.3",
+  "1000:88.3",
+  "2200:96.8",
+  "16384:100",
+]
+
+[[setting]]
+key = "curve_temperature"
+type = "string_list"
+label_key = "settings.curve_temperature.label"
+description_key = "settings.curve_temperature.description"
+default = [
+  "2500:5100",
+  "2700:5100",
+  "3000:5100",
+  "3500:5380",
+  "4000:5660",
+  "4500:5940",
+  "5000:6220",
+  "5500:6500",
+  "6000:6500",
+  "6500:6500",
+]
 
 [[setting]]
 key = "enabled"
@@ -33,20 +87,6 @@ type = "string"
 label_key = "settings.backlight.label"
 description_key = "settings.backlight.description"
 default = ""
-
-[[setting]]
-key = "reference_raw"
-type = "string"
-label_key = "settings.reference_raw.label"
-description_key = "settings.reference_raw.description"
-default = "185"
-
-[[setting]]
-key = "reference_percent"
-type = "string"
-label_key = "settings.reference_percent.label"
-description_key = "settings.reference_percent.description"
-default = "70"
 
 [[setting]]
 key = "min_percent"

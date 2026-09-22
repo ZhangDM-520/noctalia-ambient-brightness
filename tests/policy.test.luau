@@ -33,46 +33,21 @@ end
 
 local cfg = policy.DEFAULTS
 
--- ── the curve ────────────────────────────────────────────────────────────────
-check("anchor 185 raw == the owner's measured 70%",
-  policy.percent_for_raw(185, cfg), 70)
-check("anchor 1 raw", policy.percent_for_raw(1, cfg), 20)
-check("anchor 10000 is clamped to max_percent (not 100 from the 16384 anchor)",
-  policy.percent_for_raw(10000, cfg) <= cfg.max_percent, true)
-
--- everything at or below the first anchor collapses toward its value
-check("occluded floor 4 raw sits just above the first anchor",
-  policy.percent_for_raw(4, cfg), 25.374933317397158)
-check_true("0 raw does not blow up on log10 (clamps to the first anchor)",
-  policy.percent_for_raw(0, cfg) == 20)
-check_true("the occluded floor is still above min_percent",
-  policy.percent_for_raw(4, cfg) > cfg.min_percent)
--- and above the last anchor clamps to the last value
-check("torch 16653 raw clamps to max", policy.percent_for_raw(16653, cfg), 100)
-check("vast 10^9 raw still clamps", policy.percent_for_raw(1000000000, cfg), 100)
-
--- monotonic non-decreasing across the whole measured range
+-- ── the curve moved ──────────────────────────────────────────────────────────
+-- The mapping curve is now curve.luau (user-owned nodes, PCHIP interpolation) and
+-- is covered by tests/curve.test.luau. It is deliberately not tested here as well:
+-- two implementations of one curve is precisely what Phase 2 removed, and a
+-- duplicated suite would let them drift while both stayed green.
+--
+-- What stays here is the log transform, which the service still needs in order to
+-- hand curve.luau a reading in the same domain as the configured nodes.
 do
-  local prev, mono = -1, true
-  local raw = 1
-  while raw <= 40000 do
-    local p = policy.percent_for_raw(raw, cfg)
-    if p < prev - 1e-9 then mono = false end
-    prev = p
-    raw = raw + 7
-  end
-  check_true("curve is monotonic non-decreasing over 1..40000 raw", mono)
-end
-
--- log compression: the dark end must actually be resolved. With a linear axis
--- raw 46 vs raw 185 would differ by ~35% of the total span and read as a cliff;
--- log should put them on distinct, well-separated steps.
-do
-  local a = policy.percent_for_raw(46, cfg)
-  local b = policy.percent_for_raw(185, cfg)
-  local c = policy.percent_for_raw(4000, cfg)
-  check_true("dark end is resolved (46 < 185 < 4000 in percent)", a < b and b < c)
-  check("4x ambient (46) sits 20 points under the 185 anchor", b - a, 20)
+  check_true("log_of resolves the dark end of the measured range",
+    policy.log_of(4) < policy.log_of(185) and policy.log_of(185) < policy.log_of(4000))
+  check_true("log_of keeps 0 (a fully occluded sensor) finite",
+    policy.log_of(0) ~= nil and policy.log_of(0) ~= -math.huge)
+  check_true("log_of clamps a negative reading rather than going complex",
+    policy.log_of(-5) == policy.log_of(0))
 end
 
 -- ── stabiliser: asymmetric on purpose ───────────────────────────────────────

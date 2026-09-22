@@ -20,12 +20,10 @@
 local M = {}
 
 M.MAP_DEFAULTS = {
-  -- Ambient anchors. 3000 K is a warm indoor evening; the measured room sits
-  -- near 3400 K. 5500 K is roughly daylight.
-  warm_ambient_k = 3000,
-  warm_panel_k = 5100, -- the owner's own measured night-light preference
-  cool_ambient_k = 5500,
-  cool_panel_k = 6500, -- neutral, i.e. no visible tint
+  -- The mapping itself is now the `curve_temperature` setting, evaluated by
+  -- curve.luau. Phase 2 removed the two-anchor linear ramp that used to live here:
+  -- it was a second, hard-coded curve that the owner could not see or change, and
+  -- two curves for one job is how they drift apart.
   min_k = 2500,
   max_k = 6500,
 
@@ -36,22 +34,15 @@ M.MAP_DEFAULTS = {
   min_interval_s = 120,
 }
 
---- Target panel CCT for an ambient CCT, interpolated then clamped.
-function M.panel_k(ambient_k, cfg)
+--- Clamp a panel temperature into the range this display can actually use.
+-- The curve supplies the shape; the clamp is the guard rail, and it stays here
+-- rather than in the curve so that an over-eager node cannot command a
+-- temperature the panel has no gamma table for.
+function M.clamp_k(value, cfg)
   cfg = cfg or M.MAP_DEFAULTS
-  local lo_a, lo_p = cfg.warm_ambient_k, cfg.warm_panel_k
-  local hi_a, hi_p = cfg.cool_ambient_k, cfg.cool_panel_k
-  local value
-  if ambient_k <= lo_a then
-    value = lo_p
-  elseif ambient_k >= hi_a then
-    value = hi_p
-  else
-    local t = (ambient_k - lo_a) / (hi_a - lo_a)
-    value = lo_p + t * (hi_p - lo_p)
-  end
-  if value < cfg.min_k then value = cfg.min_k end
-  if value > cfg.max_k then value = cfg.max_k end
+  if value == nil then return nil end
+  if value < cfg.min_k then return cfg.min_k end
+  if value > cfg.max_k then return cfg.max_k end
   return value
 end
 

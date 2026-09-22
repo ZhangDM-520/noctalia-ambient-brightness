@@ -12,13 +12,17 @@
       "label": "Backlight device",
       "description": "Leave empty to auto-detect the first device under /sys/class/backlight."
     },
-    "reference_raw": {
-      "label": "Reference sensor reading",
-      "description": "The sensor count (not lux) that maps to the reference brightness. The curve is anchored here, so setting this to the reading you see in your normal room is the whole calibration step."
+    "learning_profile": {
+      "label": "Apply the learned profile",
+      "description": "On: apply the curve learned from your brightness changes instead of the node lists below. Off: apply your node lists. Either way the plugin keeps recording, so switching this on shows a profile that has been developing rather than an empty one. Useful while working out an initial curve. The learned profile is a file (profile.json) in the plugin data directory; this settings page cannot be written by the plugin itself, so promoting a learned value into the nodes below is a manual copy."
     },
-    "reference_percent": {
-      "label": "Reference brightness (%)",
-      "description": "The panel brightness, in percent, you want at the reference sensor reading. Defaults to your measured 70% at 185 counts."
+    "curve_brightness": {
+      "label": "Brightness curve (sensor counts : percent)",
+      "description": "One node per row, written as sensor-reading:brightness-percent. Values between nodes are joined with a smooth curve that is guaranteed never to overshoot the two nodes it sits between, so the panel stays inside the band you draw. Ten nodes are supplied as a starting point; add, remove or reorder rows freely. A '#' starts a comment. Readings are raw sensor counts, not lux, because this sensor's absolute calibration is unverified."
+    },
+    "curve_temperature": {
+      "label": "Colour temperature curve (ambient K : panel K)",
+      "description": "One node per row, written as ambient-kelvin:panel-kelvin. Lower panel values are warmer. Only used when adaptive colour temperature is enabled below. Ten nodes are supplied: flat at 5100 K below a 3000 K room, rising to 6500 K by 5500 K."
     },
     "min_percent": {
       "label": "Minimum brightness (%)",

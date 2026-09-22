@@ -20,25 +20,10 @@ end
 M.log_of = log_of
 
 M.DEFAULTS = {
-  -- Sensor counts -> panel percent. Interpolated in log10 space, which the
-  -- 4000:1 measured range (4 .. 16653 raw) makes mandatory: a linear axis would
-  -- collapse everything below ~1000 raw into one step.
-  --
-  -- The 185 -> 70 anchor is the owner's measured preference: the room sat at
-  -- 185 raw (nominal 18.5 lux) and the panel was deliberately held at 70%.
-  -- Anchors are in *raw sensor counts* rather than absolute lux on purpose --
-  -- the sensor's absolute calibration is unverified (a phone torch at point
-  -- blank reads only 1665 lux), so the curve is made self-consistent with the
-  -- one preference we can actually observe.
-  anchors = {
-    { 1, 20 },
-    { 10, 30 },
-    { 46, 50 },
-    { 185, 70 },
-    { 1000, 88 },
-    { 4000, 97 },
-    { 16384, 100 },
-  },
+  -- NOTE: the mapping curve itself is no longer here. Phase 2 moved it into
+  -- curve.luau, where it is owned by configuration rather than by constants, so
+  -- there is exactly one implementation of the curve. What remains in this module
+  -- is the temporal policy, the override window and the guards.
 
   min_percent = 15,
   max_percent = 100,
@@ -70,26 +55,12 @@ function M.clamp(value, cfg)
 end
 
 --- Target panel percent for a *log* sensor reading.
-function M.percent_for_log(l, cfg)
-  cfg = cfg or M.DEFAULTS
-  local a = cfg.anchors
-  local first = log_of(a[1][1])
-  if l <= first then return M.clamp(a[1][2], cfg) end
-  for i = 2, #a do
-    local hi = log_of(a[i][1])
-    if l <= hi then
-      local lo = log_of(a[i - 1][1])
-      local span = hi - lo
-      local t = span > 0 and (l - lo) / span or 0
-      return M.clamp(a[i - 1][2] + t * (a[i][2] - a[i - 1][2]), cfg)
-    end
-  end
-  return M.clamp(a[#a][2], cfg)
-end
-
-function M.percent_for_raw(raw, cfg)
-  return M.percent_for_log(log_of(raw), cfg)
-end
+--
+--- REMOVED in Phase 2. The curve is now the owner's, parsed and interpolated by
+--- curve.luau. policy.percent_for_log was a second implementation of the same
+--- idea, and two implementations would drift apart the moment either changed.
+--- What is left here is the log transform, which the service still needs in order
+--- to hand curve.luau a reading in the same domain as the configured nodes.
 
 --- One asymmetric-EMA step on the log reading. prev may be nil (first sample).
 function M.stabilize(prev_log, raw, dt, cfg)
