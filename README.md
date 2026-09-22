@@ -86,6 +86,12 @@ different places: the **outputs are fixed** (20.8 %, 30.7 % … 100 % for
 brightness; 5100 K … 6500 K for panel warmth) and **one slider per node chooses
 its threshold**.
 
+In the settings rows the **title is just the node id** (`Temp node 8`) and the
+description states what it maps to (`sensor ambient temp mapped -> 6500K`).
+The temperature curve compiles **four hidden anchors** (two below row 1, two
+above row 10, replicating floor and ceiling) so PCHIP keeps its flat tangent
+at both ends: ten rows in the UI, fourteen under the hood.
+
 `thr_brightness_01` … `thr_brightness_10` are those sliders, low node first. As
 ambient light rises past a slider's value, that node takes over from the one
 before it. Sliding a node past its neighbour simply swaps two steps of the curve

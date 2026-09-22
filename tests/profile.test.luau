@@ -37,8 +37,8 @@ do
   check("  ...below the range is the first node", profile.target_node(ys, -3), 1)
   check("  ...above the range is the last node", profile.target_node(ys, 999), 4)
   check("an exact match targets exactly", profile.target_node(ys, 70), 4)
-  -- Ties go to the lower node: when neighbours share an output (the three 5100 K
-  -- temperature nodes, or two nodes the owner slid close together) the
+  -- Ties go to the lower node: when neighbours share an output (two nodes the
+  -- owner slid close together; shipped outputs are all distinct now) the
   -- conservative pick is the earlier one.
   check("a tie goes to the lower node", profile.target_node({ 10, 30 }, 20), 1)
   check("equal outputs tie to the lower node", profile.target_node(ys, 45), 2)

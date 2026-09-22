@@ -29,84 +29,84 @@
       "description": "Same shape. Panel kelvin, lower is warmer. Only used with adaptive colour temperature."
     },
     "thr_brightness_01": {
-      "label": "Node 1 · 20.8 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 1",
+      "description": "sensor lightness counts mapped -> 20.8%"
     },
     "thr_brightness_02": {
-      "label": "Node 2 · 30.7 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 2",
+      "description": "sensor lightness counts mapped -> 30.7%"
     },
     "thr_brightness_03": {
-      "label": "Node 3 · 39.3 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 3",
+      "description": "sensor lightness counts mapped -> 39.3%"
     },
     "thr_brightness_04": {
-      "label": "Node 4 · 50.6 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 4",
+      "description": "sensor lightness counts mapped -> 50.6%"
     },
     "thr_brightness_05": {
-      "label": "Node 5 · 63.4 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 5",
+      "description": "sensor lightness counts mapped -> 63.4%"
     },
     "thr_brightness_06": {
-      "label": "Node 6 · 70 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 6",
+      "description": "sensor lightness counts mapped -> 70%"
     },
     "thr_brightness_07": {
-      "label": "Node 7 · 78.3 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 7",
+      "description": "sensor lightness counts mapped -> 78.3%"
     },
     "thr_brightness_08": {
-      "label": "Node 8 · 88.3 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 8",
+      "description": "sensor lightness counts mapped -> 88.3%"
     },
     "thr_brightness_09": {
-      "label": "Node 9 · 96.8 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 9",
+      "description": "sensor lightness counts mapped -> 96.8%"
     },
     "thr_brightness_10": {
-      "label": "Node 10 · 100 %",
-      "description": "Ambient reading (sensor counts) where this step applies."
+      "label": "Node 10",
+      "description": "sensor lightness counts mapped -> 100%"
     },
     "thr_temperature_01": {
-      "label": "Temp node 1 · 5100 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 1",
+      "description": "sensor ambient temp mapped -> 5100K"
     },
     "thr_temperature_02": {
-      "label": "Temp node 2 · 5100 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 2",
+      "description": "sensor ambient temp mapped -> 5240K"
     },
     "thr_temperature_03": {
-      "label": "Temp node 3 · 5100 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 3",
+      "description": "sensor ambient temp mapped -> 5380K"
     },
     "thr_temperature_04": {
-      "label": "Temp node 4 · 5380 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 4",
+      "description": "sensor ambient temp mapped -> 5520K"
     },
     "thr_temperature_05": {
-      "label": "Temp node 5 · 5660 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 5",
+      "description": "sensor ambient temp mapped -> 5660K"
     },
     "thr_temperature_06": {
-      "label": "Temp node 6 · 5940 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 6",
+      "description": "sensor ambient temp mapped -> 5800K"
     },
     "thr_temperature_07": {
-      "label": "Temp node 7 · 6220 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 7",
+      "description": "sensor ambient temp mapped -> 5940K"
     },
     "thr_temperature_08": {
-      "label": "Temp node 8 · 6500 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 8",
+      "description": "sensor ambient temp mapped -> 6080K"
     },
     "thr_temperature_09": {
-      "label": "Temp node 9 · 6500 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 9",
+      "description": "sensor ambient temp mapped -> 6220K"
     },
     "thr_temperature_10": {
-      "label": "Temp node 10 · 6500 K",
-      "description": "Ambient colour temperature (K) where this step applies."
+      "label": "Temp node 10",
+      "description": "sensor ambient temp mapped -> 6500K"
     },
     "min_percent": {
       "label": "Minimum brightness (%)",

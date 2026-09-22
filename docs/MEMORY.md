@@ -111,7 +111,7 @@ Durable facts about this project. Session-by-session working notes belong in
   `policy.luau` / `colortemp.luau` modules; `service.luau` and `hardware.luau`
   are the only files allowed to touch hardware, the shell or the filesystem —
   `hardware.luau` through its injected environment, so a fake machine replaces it
-  in tests. This is what makes 345 checks runnable without a display.
+  in tests. This is what makes 366 checks runnable without a display.
 - **Host slider settings: `type = "int"` with `min`/`max`/`step`** (also `double`);
   the default must lie within [min, max] and `step > 0`. `visible_when = { key,
   values }` gates a control on another setting — the temperature sliders use
@@ -135,7 +135,15 @@ Durable facts about this project. Session-by-session working notes belong in
   the curve. Precedence: an **edited** `curve_*` map wins over the sliders
   (`curve.map_is_custom` compares parsed nodes, so re-ordering/whitespace is not
   an edit) and **learning is suspended** while it does. Learning drifts
-  thresholds (EMA toward the observed ambient) and never outputs.
+  thresholds (EMA toward the observed ambient) and never outputs. Settings-row
+  titles are **bare node ids** (`Temp node 8`) and the description states the
+  mapping (`sensor ambient temp mapped -> 6500K`). Never put a value in a
+  title: it is a static string (host has no live-label interpolation) and it
+  goes stale on the first slider move. The temperature curve ships **ten
+  distinct outputs plus four hidden anchors** (`curve.with_anchors` on both
+  temp paths): duplicated outputs used to carry the flat floor/ceiling runs
+  and owners read the repeats as a bug — the flats belong under the hood,
+  where PCHIP's zero tangent works invisibly (14 compiled / 10 visible).
 - **Nothing may be learned while the session is idle.** The 30 % idle dim is
   authored policy, not a preference; both the tick and the `onIpc` handler check
   `S.idle` before recording an observation.

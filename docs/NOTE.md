@@ -104,3 +104,46 @@ note "restart after changing".
 tests/hardware.test.luau across 13 fake machines); live: full probe report
 logged, forced backlight `not_here` idled with the reason, restore recovered
 adaptation.
+
+## Temp-label disambiguation (2026-09-22)
+
+**Report.** Screenshot showed `Temp node 8/9/10 · 6500 K` — read as three
+nodes sharing threshold 6500 K, suggesting a broken mapping.
+
+**Diagnosis: text-only.** Row titles echo the fixed **output**
+(`FIXED_TEMPERATURE_Y` — the intentional 6500 K flat ceiling, nodes 1-3 the
+5100 K floor); the description described the **slider** (ambient threshold).
+Thresholds were always distinct and the curve monotone — 345 checks green
+incl. `buildNodes(DEFAULT_X, FIXED_Y)` ≡ default map. Rejected: thresholds in
+titles (static text, stale after any slider move).
+
+**Fix.** 20 en.json descriptions now name both quantities ("Where this step
+applies (…). The title is its output."); README one-liner; MEMORY convention
+bullet extended. No code change.
+
+**Iteration (same day).** First attempt kept the output number in titles and
+only rewrote descriptions — rejected: the user reads the title as the row's
+number and wants no repeated values there. Host labels are static
+(`literalLabel = translate(key)`, no value interpolation, sheet does not
+rebuild on slider change), so titles cannot echo the live threshold either.
+Final format (user-specified, all 20 rows): bare title + mapping description —
+`Node 6` / `sensor lightness counts mapped -> 70%`, `Temp node 1` /
+`sensor ambient temp mapped -> 5100K`.
+
+## Temperature curve restructure: 14 under the hood / 10 visible (2026-09-22)
+
+**Insight (user).** Ceiling/floor nodes are essential to smooth the curve but
+duplicated OUTPUTS exposed in the rows read as a bug to common users.
+
+**Change.** `FIXED_TEMPERATURE_Y` -> unique ladder [5100, 5240, 5380, 5520,
+5660, 5800, 5940, 6080, 6220, 6500] (six original values kept at rows
+1,3,5,7,9,10; four gap midpoints added — user chose "keep-originals").
+New `curve.with_anchors(nodes)`: 4 hidden nodes (x1-500, x1-300, x10+500,
+x10+1000, replicating endpoint y) prepended/appended on BOTH temperature
+paths (slider + advanced map) in service.luau; brightness untouched (outputs
+already unique). plugin.toml map default + en.json descriptions updated in
+lockstep. Settings sliders/x/windows unchanged.
+
+**Verified.** Suite 366 checks 0 failures (was 345; +21 in curve.test:
+anchored eval pins floor 5100 ease-out at 2510 K, ladder rows, ceiling past
+7500 K, + structural with_anchors block); manifest lint + "40 nodes agree" ok.

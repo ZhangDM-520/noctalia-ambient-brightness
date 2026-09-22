@@ -65,21 +65,24 @@ M.DEFAULT_BRIGHTNESS = {
   ["16384"] = "16384:100",
 }
 
--- Temperature: ambient K -> panel K. Faithful to the pre-Phase-2 mapping (a flat
--- 5100 K below 3000 K ambient, then linear to 6500 K at 5500 K, then flat), so a
--- fresh install behaves as it did before. The flat runs at each end are real
--- features of that mapping, not padding: PCHIP pins a flat run with a zero
--- tangent, which is exactly the wanted behaviour at both extremes.
+-- Temperature: ambient K -> panel K. Warm floor 5100 K, cool ceiling 6500 K,
+-- and TEN DISTINCT outputs between them: the original midpoints (5380, 5660,
+-- 5940, 6220) stay, each earlier gap is filled by its own midpoint (5240,
+-- 5520, 5800, 6080). The duplicated outputs that used to carry the flat runs
+-- here were read as a bug by owners, so the flats moved into with_anchors's
+-- four hidden nodes: PCHIP still pins a zero tangent at both ends, every
+-- visible row is unique, and the compiled curve keeps its floor/ceiling
+-- character (14 nodes under the hood, 10 rows in the UI).
 M.DEFAULT_TEMPERATURE = {
   ["02500"] = "2500:5100",
-  ["02700"] = "2700:5100",
-  ["03000"] = "3000:5100",
-  ["03500"] = "3500:5380",
+  ["02700"] = "2700:5240",
+  ["03000"] = "3000:5380",
+  ["03500"] = "3500:5520",
   ["04000"] = "4000:5660",
-  ["04500"] = "4500:5940",
-  ["05000"] = "5000:6220",
-  ["05500"] = "5500:6500",
-  ["06000"] = "6000:6500",
+  ["04500"] = "4500:5800",
+  ["05000"] = "5000:5940",
+  ["05500"] = "5500:6080",
+  ["06000"] = "6000:6220",
   ["06500"] = "6500:6500",
 }
 
@@ -87,7 +90,9 @@ M.DEFAULT_TEMPERATURE = {
 -- The threshold sliders edit WHERE a node sits, never what it puts out: node i
 -- always outputs FIXED_BRIGHTNESS_Y[i] (resp. FIXED_TEMPERATURE_Y[i]) at whatever
 -- ambient reading its slider was moved to. The outputs are constants here, in one
--- place, and echoed in the slider labels in translations/en.json.
+-- place, and carried in each row's en.json description (`sensor ambient temp
+-- mapped -> 5940K`). Titles stay bare node ids so no value can repeat in them
+-- or go stale after a slider move.
 --
 -- DEFAULT_*_X are the shipped slider positions -- exactly the x half of the maps
 -- above, so a fresh install rebuilds the same curve node for node. Two guards
@@ -101,7 +106,7 @@ M.DEFAULT_TEMPERATURE = {
 M.FIXED_BRIGHTNESS_Y = { 20.8, 30.7, 39.3, 50.6, 63.4, 70, 78.3, 88.3, 96.8, 100 }
 M.DEFAULT_BRIGHTNESS_X = { 1, 4, 10, 30, 100, 185, 400, 1000, 2200, 16384 }
 
-M.FIXED_TEMPERATURE_Y = { 5100, 5100, 5100, 5380, 5660, 5940, 6220, 6500, 6500, 6500 }
+M.FIXED_TEMPERATURE_Y = { 5100, 5240, 5380, 5520, 5660, 5800, 5940, 6080, 6220, 6500 }
 M.DEFAULT_TEMPERATURE_X = { 2500, 2700, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500 }
 
 --- The min, max and step of one threshold slider, exactly as plugin.toml
@@ -380,6 +385,32 @@ end
 --
 -- `nodes` must already be ascending with unique x. Duplicated or descending x
 -- makes the tangent maths meaningless, so it is rejected rather than guessed at.
+--- The four hidden anchor nodes of the temperature curve: two below the first
+--- row, two above the last, each replicating that endpoint's output. Never
+--- shown -- the settings page and the map editor see the ten rows -- but
+--- compile() sees fourteen, and that is what keeps floor and ceiling flat:
+--- PCHIP pins a zero tangent on a replicated run, so the curve eases out of
+--- 5100 K and into 6500 K exactly as the old visible duplicate triples did.
+--- Offsets mirror the legacy pairs (2500/2700 below a 3000 start, 6000/6500
+--- above a 5500 end). The input list is left untouched.
+function M.with_anchors(nodes)
+  local n = nodes and #nodes or 0
+  if n == 0 then return nodes end
+  local first, last = nodes[1], nodes[n]
+  if not is_finite(first.x) or not is_finite(first.y)
+      or not is_finite(last.x) or not is_finite(last.y) then
+    return nodes
+  end
+  local out = {
+    { x = first.x - 500, y = first.y },
+    { x = first.x - 300, y = first.y },
+  }
+  for i = 1, n do out[#out + 1] = nodes[i] end
+  out[#out + 1] = { x = last.x + 500, y = last.y }
+  out[#out + 1] = { x = last.x + 1000, y = last.y }
+  return out
+end
+
 function M.compile(nodes)
   local n = nodes and #nodes or 0
   if n == 0 then return nil end

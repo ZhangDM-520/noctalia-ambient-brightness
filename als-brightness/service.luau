@@ -237,7 +237,7 @@ end
 
 --- The map path: the owner's rows, parsed exactly as written (Phase 5 and
 --- earlier). Used only when the map was edited away from the shipped default.
-local function load_curve(key, fallback, map_x)
+local function load_curve(key, fallback, map_x, anchor)
   local items = setting_nodes(key, fallback)
   local nodes, problems = curve.parse_nodes(items, { map_x = map_x })
   for _, problem in ipairs(problems) do
@@ -253,19 +253,21 @@ local function load_curve(key, fallback, map_x)
     -- because PCHIP cannot overshoot past a node value.
     log("curve " .. key .. ": values are not monotone; using them as written")
   end
-  return curve.compile(nodes), #nodes
+  local compiled = anchor and curve.with_anchors(nodes) or nodes
+  return curve.compile(compiled), #nodes
 end
 
 --- The slider path (Phase 6): outputs are the fixed constants in curve.luau and
 --- the sliders choose each node's threshold. Build problems (crossing sliders,
 --- unusable values) are logged HERE, never in rebuild_active, which runs on
 --- every observation.
-local function load_slider_curve(key, thresholds, fixed_ys, map_x)
+local function load_slider_curve(key, thresholds, fixed_ys, map_x, anchor)
   local nodes, problems = curve.buildNodes(thresholds, fixed_ys, { map_x = map_x })
   for _, problem in ipairs(problems) do
     log("curve " .. key .. ": " .. problem)
   end
-  return curve.compile(nodes), #nodes
+  local compiled = anchor and curve.with_anchors(nodes) or nodes
+  return curve.compile(compiled), #nodes
 end
 
 local function reload()
@@ -295,14 +297,20 @@ local function reload()
       load_slider_curve("curve_brightness", THR_BR, curve.FIXED_BRIGHTNESS_Y, map_brightness_x)
   end
   if TEMP_CUSTOM_MAP then
-    CURVE_TEMP, COUNT_TEMP = load_curve("curve_temperature", curve.DEFAULT_TEMPERATURE, nil)
+    CURVE_TEMP, COUNT_TEMP =
+      load_curve("curve_temperature", curve.DEFAULT_TEMPERATURE, nil, true)
   else
     CURVE_TEMP, COUNT_TEMP =
-      load_slider_curve("curve_temperature", THR_TEMP, curve.FIXED_TEMPERATURE_Y, nil)
+      load_slider_curve("curve_temperature", THR_TEMP, curve.FIXED_TEMPERATURE_Y, nil, true)
   end
 
   if BR_CUSTOM_MAP and LEARNING then
     log("learning suspended: curve_brightness is a custom map (the map wins outright)")
+  end
+
+  if CURVE_TEMP then
+    log(string.format("temperature curve: %d visible + %d hidden anchor nodes",
+      COUNT_TEMP, CURVE_TEMP.n - COUNT_TEMP))
   end
 
   rebuild_active()

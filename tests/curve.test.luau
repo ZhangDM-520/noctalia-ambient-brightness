@@ -421,16 +421,53 @@ do
   check("the default temperature list is 10 nodes", #nodes, 10)
   check("the default temperature list parses without problems", #problems, 0)
   check_true("  ...and is monotone", curve.is_monotone(nodes))
-  local c = curve.compile(nodes)
-  -- faithful to the pre-Phase-2 mapping: flat 5100 below 3000 K ambient
+  -- compiled exactly as the service compiles it: ten visible rows + four anchors
+  local c = curve.compile(curve.with_anchors(nodes))
+  -- the floor: the hidden anchors hold 5100 K below row 1 with a zero tangent
+  check("a 2000 K room gives 5100 K", math.floor(curve.eval(c, 2000)), 5100)
   check("a warm 2500 K room gives 5100 K", math.floor(curve.eval(c, 2500)), 5100)
-  check("3000 K ambient gives 5100 K", math.floor(curve.eval(c, 3000)), 5100)
-  -- ...then linear, so the existing midpoints must survive the change
-  check("4000 K ambient gives ~5660 K", math.floor(curve.eval(c, 4000) + 0.5), 5660)
-  check("5000 K ambient gives ~6220 K", math.floor(curve.eval(c, 5000) + 0.5), 6220)
-  -- ...and flat at the ceiling above 5500
-  check("5500 K ambient gives 6500 K", math.floor(curve.eval(c, 5500) + 0.5), 6500)
-  check("a 6500 K ambient still gives 6500 K", math.floor(curve.eval(c, 6500) + 0.5), 6500)
+  check_true("  ...and eases out of it (2510 K stays under 5101 K)",
+    curve.eval(c, 2510) < 5101)
+  -- the unique ladder: every shipped row survives exactly
+  check("3000 K ambient gives 5380 K", math.floor(curve.eval(c, 3000) + 0.5), 5380)
+  check("4000 K ambient gives 5660 K", math.floor(curve.eval(c, 4000) + 0.5), 5660)
+  check("5000 K ambient gives 5940 K", math.floor(curve.eval(c, 5000) + 0.5), 5940)
+  check("6000 K ambient gives 6220 K", math.floor(curve.eval(c, 6000) + 0.5), 6220)
+  -- the ceiling: the anchors carry 6500 K past row 10
+  check("a 6500 K ambient gives 6500 K", math.floor(curve.eval(c, 6500) + 0.5), 6500)
+  check("a 7500 K ambient still gives 6500 K", math.floor(curve.eval(c, 7500) + 0.5), 6500)
+end
+
+do
+  -- The four hidden anchors: never shown, always compiled (14 under the hood,
+  -- 10 visible rows).
+  local vis = curve.parse_nodes(curve.DEFAULT_TEMPERATURE)
+  local all = curve.with_anchors(vis)
+  check("four hidden nodes are added", #all, 14)
+  check("the visible list is untouched", #vis, 10)
+  check("floor anchor sits at x1-500", all[1].x, 2000)
+  check("second floor anchor at x1-300", all[2].x, 2200)
+  check("both replicate row 1's output", all[1].y, 5100)
+  check("  ...the second too", all[2].y, 5100)
+  check("row 1 stays put", all[3].x, 2500)
+  check("row 10 stays put", all[12].x, 6500)
+  check("ceiling anchor at x10+500", all[13].x, 7000)
+  check("last anchor at x10+1000", all[14].x, 7500)
+  check("ceiling anchors replicate row 10", all[13].y, 6500)
+  check("  ...both", all[14].y, 6500)
+  local increasing = true
+  for i = 2, #all do
+    if all[i].x <= all[i - 1].x then increasing = false end
+  end
+  check_true("the 14 nodes are strictly increasing", increasing)
+  check_true("...so the compiled curve exists", curve.compile(all) ~= nil)
+  -- a custom map replicates ITS endpoints, whatever they are
+  local ca = curve.with_anchors({ { x = 10, y = 5 }, { x = 20, y = 9 } })
+  check("custom shapes get four anchors too", #ca, 6)
+  check("its floor is replicated", ca[1].y, 5)
+  check("its ceiling is replicated", ca[6].y, 9)
+  -- degenerate input passes through
+  check("an empty list passes through", #curve.with_anchors({}), 0)
 end
 
 do
