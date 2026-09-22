@@ -69,6 +69,24 @@ local function setting_nodes(key, fallback)
   return fallback
 end
 
+--- The 20 threshold sliders ("thr_brightness_01".."thr_temperature_10"). Each
+--- commits to its own config path, so a GUI edit of one slider never masks its
+--- siblings -- which is exactly what the string_map editors do (the host marks
+--- the whole map overridden on the first row edit), and why the maps are demoted
+--- to advanced fallbacks. Out-of-window values from a hand-edited config are
+--- honoured as written; buildNodes repairs whatever would break the
+--- interpolation and logs it once.
+local function setting_thresholds(prefix, defaults)
+  local out = {}
+  for i = 1, #defaults do
+    out[i] = setting_number(string.format("%s_%02d", prefix, i), defaults[i])
+  end
+  return out
+end
+
+--- Has the owner edited a map away from the shipped default? That decision lives
+--- in curve.map_is_custom (Phase 6 precedence): pure, and testable offline.
+
 -- ── logging ──────────────────────────────────────────────────────────────────
 -- writeFile replaces the file, so keep a bounded ring buffer in memory and rewrite
 -- it. That gives real history without needing an append mode.
@@ -96,17 +114,20 @@ local CFG = {}
 for k, v in pairs(policy.DEFAULTS) do CFG[k] = v end
 
 local CONNECTOR, ENABLED, COLORTEMP, LEARNING
--- The authored curves, plus the x positions they were built from. Keeping the x's
--- lets a fitted profile be laid onto exactly the same points, which is what makes
--- promoting a learned value into the settings page a bar-for-bar copy.
-local CURVE_BR, XS_BR, AUTHORED_BR = nil, {}, {}
-local CURVE_TEMP = nil
+-- The slider positions (thresholds, raw domain) currently in force, in slider
+-- order. Learning seeds from these and drifts them, so promoting a learned value
+-- back into the settings page is a bar-for-bar copy.
+local THR_BR, THR_TEMP = {}, {}
+-- The compiled curves: slider-built by default, the advanced map when edited.
+local CURVE_BR, CURVE_TEMP = nil, nil
 local COUNT_BR, COUNT_TEMP = 0, 0
--- What the tick actually evaluates: the authored curve, or the authored curve with
--- learned bands filled in.
+local BR_CUSTOM_MAP, TEMP_CUSTOM_MAP = false, false
+-- What the tick actually evaluates: the slider curve, optionally with learned
+-- threshold nudges layered on (never on a custom map -- see rebuild_active).
 local ACTIVE_BR = nil
-local LEARNED_BANDS = 0
-local CURVE_SOURCE = "authored"
+local LEARNED_NODES = 0
+local PROF_CFG_BR = nil
+local CURVE_SOURCE = "sliders"
 
 --- The brightness curve is interpolated in log10(raw + 1). Not cosmetic: the
 --- measured range is ~4000:1 (4 .. 16653 raw), so a linear axis would collapse
@@ -148,31 +169,62 @@ local function save_profile(now_s, force)
   end
 end
 
---- Fill the authored curve's y values in with whatever the profile can speak for.
-local function rebuild_active()
-  LEARNED_BANDS = 0
-  if not LEARNING then
-    ACTIVE_BR = CURVE_BR
-    CURVE_SOURCE = "authored"
-    return
+--- Learning clamps its nudges into each slider's own window
+--- (curve.threshold_window), so a learned threshold can always be copied back
+--- into the GUI without being clipped by the slider's own min/max.
+local function fit_bounds(kind)
+  local lo, hi = {}, {}
+  for i = 1, #curve.FIXED_BRIGHTNESS_Y do
+    local w_lo, w_hi = curve.threshold_window(kind, i)
+    lo[i], hi[i] = w_lo, w_hi
   end
-
-  local ys = profile.fit(PROF, XS_BR, AUTHORED_BR, CFG)
-  local nodes = {}
-  for i = 1, #XS_BR do nodes[i] = { x = XS_BR[i], y = ys[i] } end
-  local learned = curve.compile(nodes)
-  if learned == nil then
-    -- Nothing learnable yet: behave exactly as if the toggle were off, so an empty
-    -- profile can never leave the panel unmanaged.
-    ACTIVE_BR = CURVE_BR
-    CURVE_SOURCE = "authored (profile not usable yet)"
-    return
-  end
-  ACTIVE_BR = learned
-  LEARNED_BANDS = profile.learned_bands(PROF, XS_BR, CFG)
-  CURVE_SOURCE = string.format("learned (%d/%d bands)", LEARNED_BANDS, #XS_BR)
+  return { lo = lo, hi = hi }
 end
 
+--- What the tick evaluates: the slider-built curve, with learned threshold nudges
+--- layered on when learning is on. Outputs never move (they are the fixed
+--- constants in curve.luau); only where each node sits does.
+---
+--- Runs on every observation, so it never logs -- slider build problems are
+--- logged once, in reload().
+local function rebuild_active()
+  LEARNED_NODES = 0
+  if BR_CUSTOM_MAP then
+    -- A custom map is the power-user override and wins outright. Learning is
+    -- suspended on purpose (decision locked): nudging thresholds would silently
+    -- fight the curve the owner wrote by hand.
+    ACTIVE_BR = CURVE_BR
+    CURVE_SOURCE = "map (custom, learning suspended)"
+    return
+  end
+
+  local xs = THR_BR
+  if LEARNING then
+    local fitted, counts = profile.fit_thresholds(
+      PROF, curve.FIXED_BRIGHTNESS_Y, THR_BR, PROF_CFG_BR)
+    xs = fitted
+    LEARNED_NODES = profile.learned_nodes(counts)
+  end
+
+  local nodes = curve.buildNodes(xs, curve.FIXED_BRIGHTNESS_Y, { map_x = map_brightness_x })
+  local built = curve.compile(nodes)
+  if built == nil then
+    -- Nothing usable: behave exactly as if the toggle were off, so an unusable
+    -- profile can never leave the panel unmanaged.
+    ACTIVE_BR = CURVE_BR
+    CURVE_SOURCE = "sliders (profile not usable yet)"
+    return
+  end
+  ACTIVE_BR = built
+  if LEARNING then
+    CURVE_SOURCE = string.format("sliders+learned (%d/%d nodes)", LEARNED_NODES, #THR_BR)
+  else
+    CURVE_SOURCE = "sliders"
+  end
+end
+
+--- The map path: the owner's rows, parsed exactly as written (Phase 5 and
+--- earlier). Used only when the map was edited away from the shipped default.
 local function load_curve(key, fallback, map_x)
   local items = setting_nodes(key, fallback)
   local nodes, problems = curve.parse_nodes(items, { map_x = map_x })
@@ -189,12 +241,19 @@ local function load_curve(key, fallback, map_x)
     -- because PCHIP cannot overshoot past a node value.
     log("curve " .. key .. ": values are not monotone; using them as written")
   end
-  local xs, ys = {}, {}
-  for i, node in ipairs(nodes) do
-    xs[i] = node.x
-    ys[i] = node.y
+  return curve.compile(nodes), #nodes
+end
+
+--- The slider path (Phase 6): outputs are the fixed constants in curve.luau and
+--- the sliders choose each node's threshold. Build problems (crossing sliders,
+--- unusable values) are logged HERE, never in rebuild_active, which runs on
+--- every observation.
+local function load_slider_curve(key, thresholds, fixed_ys, map_x)
+  local nodes, problems = curve.buildNodes(thresholds, fixed_ys, { map_x = map_x })
+  for _, problem in ipairs(problems) do
+    log("curve " .. key .. ": " .. problem)
   end
-  return curve.compile(nodes), xs, ys, #nodes
+  return curve.compile(nodes), #nodes
 end
 
 local function reload()
@@ -204,19 +263,42 @@ local function reload()
   CONNECTOR = setting_string("connector", "eDP-1")
   CFG.min_percent = setting_number("min_percent", 15)
   CFG.max_percent = setting_number("max_percent", 100)
+  PROF_CFG_BR = fit_bounds("brightness")
 
-  local br
-  br, XS_BR, AUTHORED_BR, COUNT_BR =
-    load_curve("curve_brightness", curve.DEFAULT_BRIGHTNESS, map_brightness_x)
-  CURVE_BR = br
-  CURVE_TEMP, _, _, COUNT_TEMP =
-    load_curve("curve_temperature", curve.DEFAULT_TEMPERATURE, nil)
+  THR_BR = setting_thresholds("thr_brightness", curve.DEFAULT_BRIGHTNESS_X)
+  THR_TEMP = setting_thresholds("thr_temperature", curve.DEFAULT_TEMPERATURE_X)
+
+  -- Precedence (Phase 6): the sliders run the curve; the advanced map editors
+  -- win only when the owner actually edited them away from the shipped default.
+  BR_CUSTOM_MAP = curve.map_is_custom(
+    setting_nodes("curve_brightness", curve.DEFAULT_BRIGHTNESS), curve.DEFAULT_BRIGHTNESS)
+  TEMP_CUSTOM_MAP = curve.map_is_custom(
+    setting_nodes("curve_temperature", curve.DEFAULT_TEMPERATURE), curve.DEFAULT_TEMPERATURE)
+
+  if BR_CUSTOM_MAP then
+    CURVE_BR, COUNT_BR = load_curve("curve_brightness", curve.DEFAULT_BRIGHTNESS, map_brightness_x)
+  else
+    CURVE_BR, COUNT_BR =
+      load_slider_curve("curve_brightness", THR_BR, curve.FIXED_BRIGHTNESS_Y, map_brightness_x)
+  end
+  if TEMP_CUSTOM_MAP then
+    CURVE_TEMP, COUNT_TEMP = load_curve("curve_temperature", curve.DEFAULT_TEMPERATURE, nil)
+  else
+    CURVE_TEMP, COUNT_TEMP =
+      load_slider_curve("curve_temperature", THR_TEMP, curve.FIXED_TEMPERATURE_Y, nil)
+  end
+
+  if BR_CUSTOM_MAP and LEARNING then
+    log("learning suspended: curve_brightness is a custom map (the map wins outright)")
+  end
 
   rebuild_active()
 
   log(string.format(
-    "config: brightness=%d nodes temperature=%d nodes learning=%s source=%s",
-    COUNT_BR, COUNT_TEMP, tostring(LEARNING), CURVE_SOURCE))
+    "config: brightness=%d nodes via %s, temperature=%d nodes via %s, learning=%s source=%s",
+    COUNT_BR, BR_CUSTOM_MAP and "map" or "sliders",
+    COUNT_TEMP, TEMP_CUSTOM_MAP and "map" or "sliders",
+    tostring(LEARNING), CURVE_SOURCE))
 end
 
 -- ── backlight device discovery ───────────────────────────────────────────────
@@ -299,8 +381,8 @@ local function record_observation(raw, percent, now_s)
   DIRTY = true
   save_profile(now_s, false)
   -- The learned curve only changes when an observation lands, so this is the only
-  -- place it needs rebuilding.
-  if LEARNING then rebuild_active() end
+  -- place it needs rebuilding. A custom map suspends learning entirely.
+  if LEARNING and not BR_CUSTOM_MAP then rebuild_active() end
 end
 
 -- ── colour temperature ───────────────────────────────────────────────────────

@@ -29,45 +29,45 @@ local function check_true(label, got)
   check(label, got and true or false, true)
 end
 
--- ── median ───────────────────────────────────────────────────────────────────
+-- ── target_node ──────────────────────────────────────────────────────────────
 
-check("median of an odd count", profile.median({ 3, 1, 2 }), 2)
-check("median of an even count averages the middle pair", profile.median({ 4, 1, 3, 2 }), 2.5)
-check("median of one value", profile.median({ 7 }), 7)
-check("median of nothing is nil", profile.median({}), nil)
-check("median does not reorder the caller's table", (function()
-  local t = { 3, 1, 2 }
-  profile.median(t)
-  return t[1]
-end)(), 3)
-
--- The reason median was chosen over mean: this sensor moves +/-10000 counts in one
--- 50 ms sample, so one shadowed sample must not drag a band's learned value.
 do
-  local noisy = { 70, 70.5, 69.5, 70, 9999 }
-  local sum = 0
-  for _, v in ipairs(noisy) do sum = sum + v end
-  check("median shrugs off one wild sample", profile.median(noisy), 70)
-  check_true("  ...where the mean would not (" .. string.format("%.1f", sum / #noisy) .. ")",
-    math.abs(sum / #noisy - 70) > 1000)
+  local ys = { 20, 45, 45, 70 }
+  check("a change targets the node whose fixed output is nearest", profile.target_node(ys, 44), 2)
+  check("  ...below the range is the first node", profile.target_node(ys, -3), 1)
+  check("  ...above the range is the last node", profile.target_node(ys, 999), 4)
+  check("an exact match targets exactly", profile.target_node(ys, 70), 4)
+  -- Ties go to the lower node: when neighbours share an output (the three 5100 K
+  -- temperature nodes, or two nodes the owner slid close together) the
+  -- conservative pick is the earlier one.
+  check("a tie goes to the lower node", profile.target_node({ 10, 30 }, 20), 1)
+  check("equal outputs tie to the lower node", profile.target_node(ys, 45), 2)
+  check("a single node always wins", profile.target_node({ 5 }, 12345), 1)
+  check("no nodes means no target", profile.target_node({}, 1), nil)
+  check("a non-finite value has no target", profile.target_node(ys, 0 / 0), nil)
+  check("a non-table has no target", profile.target_node(nil, 1), nil)
 end
 
--- ── band_of ──────────────────────────────────────────────────────────────────
+-- ── fit_thresholds: learning nudges thresholds, never outputs ─────────────────
 
 do
-  local xs = { 0, 1, 2, 3 } -- boundaries at 0.5, 1.5, 2.5
-  check("below the first centre is band 1", profile.band_of(xs, 0), 1)
-  check("just below the first boundary is band 1", profile.band_of(xs, 0.499), 1)
-  check("the midpoint belongs to the upper band", profile.band_of(xs, 0.5), 2)
-  check("mid band", profile.band_of(xs, 1.4), 2)
-  check("the second midpoint belongs to band 3", profile.band_of(xs, 1.5), 3)
-  check("the last midpoint belongs to the last band", profile.band_of(xs, 2.5), 4)
-  check("far above the range is the last band", profile.band_of(xs, 99999), 4)
-  check("far below the range is the first band", profile.band_of(xs, -99999), 1)
-  check("a single centre is always band 1", profile.band_of({ 5 }, 12345), 1)
-  check("no centres means no band", profile.band_of({}, 1), nil)
-  check("NaN has no band", profile.band_of(xs, 0 / 0), nil)
-  check("nil has no band", profile.band_of(xs, nil), nil)
+  local ys = { 20, 45, 70 }
+  local seeds = { 100, 200, 300 }
+  local xs, counts = profile.fit_thresholds(profile.new(), ys, seeds)
+  check("an empty profile keeps the slider positions (1)", xs[1], 100)
+  check("  ...(2)", xs[2], 200)
+  check("  ...(3)", xs[3], 300)
+  check("  ...and reports no observations", counts[1] + counts[2] + counts[3], 0)
+end
+
+do
+  local ys = { 20, 45, 70 }
+  local seeds = { 100, 200, 300 }
+  local p = profile.new()
+  profile.add(p, { x = 2.3, y = 46, raw = 250 })
+  local xs, counts = profile.fit_thresholds(p, ys, seeds)
+  check("one observation is not enough to move a node", xs[2], 200)
+  check("  ...but it is counted", counts[2], 1)
 end
 
 -- ── add: the rolling window ──────────────────────────────────────────────────
@@ -79,7 +79,7 @@ do
   check("an observation is recorded", #p.observations, 1)
   check("  ...with its curve-domain x", p.observations[1].x, 1)
   check("  ...its value", p.observations[1].y, 70)
-  check("  ...and its raw counts kept for diagnostics", p.observations[1].raw, 185)
+  check("  ...and the ambient its threshold will drift toward", p.observations[1].raw, 185)
 end
 
 do
@@ -104,112 +104,106 @@ do
   check("refusing an observation is not an error", profile.add(nil, { x = 1, y = 1 }), nil)
 end
 
--- ── fit ──────────────────────────────────────────────────────────────────────
-
 do
-  local xs = { 0, 1, 2, 3 }
-  local fallback = { 10, 20, 30, 40 }
-
-  local ys, counts = profile.fit(profile.new(), xs, fallback)
-  check("an empty profile fits to the authored values (1)", ys[1], 10)
-  check("  ...(2)", ys[2], 20)
-  check("  ...(3)", ys[3], 30)
-  check("  ...(4)", ys[4], 40)
-  check("  ...and reports no observations", counts[1] + counts[2] + counts[3] + counts[4], 0)
-end
-
-do
-  -- Below the floor a band must NOT be learned: one shadowed sample is not a
-  -- preference, it is noise.
-  local xs = { 0, 1, 2, 3 }
-  local fallback = { 10, 20, 30, 40 }
+  -- Two observations clear the floor. The EMA is seeded at the slider value, so
+  -- "learned" always means "nudged from where the owner slid it": 200 -> 207.5
+  -- -> 213.875, drifting toward the observed ambient of 250.
+  local ys = { 20, 45, 70 }
+  local seeds = { 100, 200, 300 }
   local p = profile.new()
-  profile.add(p, { x = 1.1, y = 99 })
-  local ys, counts = profile.fit(p, xs, fallback)
-  check("one observation is not enough to learn a band", ys[2], 20)
-  check("  ...and the count still reports it", counts[2], 1)
+  profile.add(p, { x = 2.3, y = 46, raw = 250 })
+  profile.add(p, { x = 2.3, y = 44, raw = 250 })
+  local xs, counts = profile.fit_thresholds(p, ys, seeds)
+  check("two observations nudge the targeted node's threshold", xs[2], 213.875)
+  check("  ...and leave the other nodes at their seeds (1)", xs[1], 100)
+  check("  ...(3)", xs[3], 300)
+  check("the nudged node reports its count", counts[2], 2)
 end
 
 do
-  local xs = { 0, 1, 2, 3 }
-  local fallback = { 10, 20, 30, 40 }
+  -- `raw` is the ambient in the slider domain; obs.x is a different domain
+  -- (log10 for brightness), so an observation without raw cannot say where the
+  -- node should sit -- it is skipped rather than guessed at.
+  local ys = { 20, 45, 70 }
+  local seeds = { 100, 200, 300 }
   local p = profile.new()
-  profile.add(p, { x = 1.1, y = 99 })
-  profile.add(p, { x = 1.2, y = 101 })
-  local ys, counts = profile.fit(p, xs, fallback)
-  check("two observations do learn a band", ys[2], 100)
-  check("  ...and the other bands stay authored", ys[1], 10)
-  check("  ...(3)", ys[3], 30)
-  check("  ...(4)", ys[4], 40)
-  check("the learned band is counted", counts[2], 2)
+  profile.add(p, { x = 1.2, y = 45 })
+  profile.add(p, { x = 1.3, y = 45 })
+  local xs, counts = profile.fit_thresholds(p, ys, seeds)
+  check("observations without raw counts cannot teach a threshold", xs[2], 200)
+  check("  ...and are not counted", counts[2], 0)
 end
 
 do
-  -- The demonstration that matters: several observations in the band the owner
-  -- actually sits in, plus one outlier, must produce the owner's value.
-  local xs = { 0, 1, 2, 3 }
-  local fallback = { 10, 20, 30, 40 }
+  -- Each manual change lands on the node whose output the owner chose, and
+  -- nodes drift independently: 100 -> 97 -> 94.45 and 300 -> 307.5 -> 313.875.
+  local ys = { 20, 45, 70 }
+  local seeds = { 100, 200, 300 }
   local p = profile.new()
-  for _, y in ipairs({ 70, 70.5, 69.5, 70, 9999 }) do
-    profile.add(p, { x = 1.05, y = y })
-  end
-  local ys = profile.fit(p, xs, fallback)
-  check("a band fits the median, not the mean", ys[2], 70)
+  profile.add(p, { x = 1, y = 21, raw = 80 })
+  profile.add(p, { x = 1, y = 19, raw = 80 })
+  profile.add(p, { x = 3, y = 68, raw = 350 })
+  profile.add(p, { x = 3, y = 72, raw = 350 })
+  local xs, counts = profile.fit_thresholds(p, ys, seeds)
+  check("nodes drift independently (1)", xs[1], 94.45)
+  check("  ...(2)", xs[2], 200)
+  check("  ...(3)", xs[3], 313.875)
+  check("learned_nodes counts exactly the nodes that cleared the floor",
+    profile.learned_nodes(counts), 2)
 end
 
 do
-  local xs = { 0, 1, 2, 3 }
-  local fallback = { 10, 20, 30, 40 }
+  -- A learned threshold is clamped into the slider's window
+  -- (curve.threshold_window) so it can always be copied back into the GUI
+  -- without being clipped by the slider's own min/max.
+  local ys = { 20, 45, 70 }
+  local seeds = { 100, 200, 300 }
   local p = profile.new()
-  -- two observations squarely inside each band, so every band clears the floor
-  for band = 1, 4 do
-    local x = band - 1 -- 0, 1, 2, 3 sit inside bands 1..4 (boundaries are 0.5/1.5/2.5)
-    profile.add(p, { x = x, y = band * 11 })
-    profile.add(p, { x = x, y = band * 11 })
-  end
-  local ys, counts = profile.fit(p, xs, fallback)
-  check("a fully learned profile overrides every band (1)", ys[1], 11)
-  check("  ...(2)", ys[2], 22)
-  check("  ...(3)", ys[3], 33)
-  check("  ...(4)", ys[4], 44)
-  check("every band reports its count", counts[4], 2)
-  check("  ...and learned_bands agrees", profile.learned_bands(p, xs), 4)
+  profile.add(p, { x = 3, y = 45, raw = 10000 })
+  profile.add(p, { x = 3, y = 45, raw = 10000 })
+  local xs_hi = profile.fit_thresholds(p, ys, seeds, { hi = { 120, 220, 320 } })
+  check("a learned threshold is clamped to the window's ceiling", xs_hi[2], 220)
+  local xs_lo = profile.fit_thresholds(p, ys, seeds, { lo = { 3000, 4000, 5000 } })
+  check("  ...and to its floor", xs_lo[2], 4000)
 end
 
 do
-  -- Out-of-domain observations land in the end bands, consistent with the curves
-  -- holding their end values flat.
-  local xs = { 0, 1, 2, 3 }
-  local fallback = { 10, 20, 30, 40 }
+  local ys = { 20, 45, 70 }
+  local seeds = { 100, 200, 300 }
   local p = profile.new()
-  profile.add(p, { x = -500, y = 5 })
-  profile.add(p, { x = -400, y = 10 })
-  profile.add(p, { x = 900, y = 90 })
-  profile.add(p, { x = 1000, y = 95 })
-  local ys = profile.fit(p, xs, fallback)
-  check("far-below observations fall into the first band", ys[1], 7.5)
-  check("far-above observations fall into the last band", ys[4], 92.5)
+  profile.add(p, { x = 3, y = 45, raw = 250 })
+  local xs = profile.fit_thresholds(p, ys, seeds, { min_observations = 1 })
+  check("the observation floor is configurable", xs[2], 207.5)
+  xs = profile.fit_thresholds(p, ys, seeds, { min_observations = 1, learn_alpha = 1 })
+  check("so is the EMA weight", xs[2], 250)
 end
 
 do
-  local ys, counts = profile.fit(profile.new(), {}, {})
-  check("fitting no bands is not an error", #ys, 0)
+  -- Without a seed the node has nowhere to drift from, so it stays unset rather
+  -- than being invented.
+  local p = profile.new()
+  profile.add(p, { x = 1, y = 45, raw = 250 })
+  profile.add(p, { x = 1, y = 45, raw = 250 })
+  local xs, counts = profile.fit_thresholds(p, { 20, 45, 70 }, nil)
+  check("an unseeded node is never invented", xs[2], nil)
+  check("  ...and is not counted", counts[2], 0)
+end
+
+do
+  local xs, counts = profile.fit_thresholds(profile.new(), {}, {})
+  check("fitting no nodes is not an error", #xs, 0)
   check("  ...and counts nothing", #counts, 0)
 end
 
--- ── learned_bands ────────────────────────────────────────────────────────────
+-- ── learned_nodes ────────────────────────────────────────────────────────────
 
 do
-  local xs = { 0, 1, 2, 3 }
-  local p = profile.new()
-  check("an empty profile has no learned bands", profile.learned_bands(p, xs), 0)
-  profile.add(p, { x = 1.1, y = 1 })
-  check("one observation is not a learned band", profile.learned_bands(p, xs), 0)
-  profile.add(p, { x = 1.2, y = 2 })
-  check("two observations make one learned band", profile.learned_bands(p, xs), 1)
-  profile.add(p, { x = 2.1, y = 3 })
-  profile.add(p, { x = 2.2, y = 4 })
-  check("two bands learned", profile.learned_bands(p, xs), 2)
+  check("an empty profile speaks for no nodes", profile.learned_nodes({}), 0)
+  check("counts below the floor do not count", profile.learned_nodes({ 1, 0, 1, 1 }), 0)
+  check("counts at the floor do", profile.learned_nodes({ 2, 1, 0, 5 }), 2)
+  check("the floor is configurable",
+    profile.learned_nodes({ 1, 1, 0, 1 }, { min_observations = 1 }), 3)
+  check_true("missing counts are not an error", profile.learned_nodes(nil) == 0)
 end
 
 -- ── sanitise: profile.json is a file the owner can corrupt ───────────────────
@@ -263,9 +257,12 @@ end
 
 do
   -- A sanitised profile must be immediately usable by fit(), which is the point.
-  local p = profile.sanitise({ observations = { { x = 1.1, y = 90 }, { x = 1.2, y = 90 } } })
-  local ys = profile.fit(p, { 0, 1, 2 }, { 10, 20, 30 })
-  check("a sanitised profile fits", ys[2], 90)
+  local p = profile.sanitise({ observations = {
+    { x = 1.1, y = 45, raw = 250 },
+    { x = 1.2, y = 45, raw = 250 },
+  } })
+  local xs = profile.fit_thresholds(p, { 20, 45, 70 }, { 100, 200, 300 })
+  check("a sanitised profile fits", xs[2], 213.875)
 end
 
 print(string.format("\n%d checks, %d failure(s)", checks, failures))

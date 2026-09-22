@@ -48,9 +48,12 @@ Configured in Noctalia's Settings UI, or via
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `learning_profile` | `false` | **The head of the settings page.** On: apply the curve learned from your own adjustments. Off: apply the node lists below. Either way the plugin keeps recording. |
-| `curve_brightness` | 10 nodes | Your brightness curve. One row per node; the value is the target percent. Rows are editable in place. |
-| `curve_temperature` | 10 nodes | Your panel-warmth curve. Same shape. |
+| `learning_profile` | `false` | **The head of the settings page.** On: nudge the sliders below toward the ambient you adjust brightness in. Off: the sliders are used exactly as you set them. Either way the plugin keeps recording. |
+| `thr_brightness_01` … `thr_brightness_10` | 1, 4, 10, 30, 100, 185, 400, 1000, 2200, 16384 | **One slider per curve node.** Each chooses the ambient reading where that node takes over; what the node outputs (20.8 % … 100 %) is fixed. |
+| `thr_temperature_01` … `thr_temperature_10` | 2500 … 6500 | The panel-warmth thresholds, same idea. Shown only while `colortemp` is on. |
+| `show_advanced` | `false` | **Advanced maps.** On: reveal the two raw map editors below; Off: hidden. |
+| `curve_brightness` | 10 nodes | **Advanced** (behind `show_advanced`). Power-user override: one row per node, `reading:target`. Edit it and it wins over the sliders. |
+| `curve_temperature` | 10 nodes | **Advanced.** Same shape. |
 | `enabled` | `true` | Master switch. While off the panel is left alone entirely. |
 | `connector` | `eDP-1` | Output to drive. |
 | `backlight` | auto | Backlight device under `/sys/class/backlight`. |
@@ -60,8 +63,29 @@ Configured in Noctalia's Settings UI, or via
 
 ### The curve
 
-Each curve is a **`string_map`**: one row per node, with the reading as the row's
-key and the target as its value.
+Each curve is **ten nodes**. A node is a pair — the ambient reading where it takes
+over, and the output it produces there — and the two halves are edited in
+different places: the **outputs are fixed** (20.8 %, 30.7 % … 100 % for
+brightness; 5100 K … 6500 K for panel warmth) and **one slider per node chooses
+its threshold**.
+
+`thr_brightness_01` … `thr_brightness_10` are those sliders, low node first. As
+ambient light rises past a slider's value, that node takes over from the one
+before it. Sliding a node past its neighbour simply swaps two steps of the curve
+— the pair travels together, so the shape is never in question — and two sliders
+landing on the same reading are nudged one count apart (with a log line) so the
+interpolation always has something to interpolate.
+
+Because each slider is its own setting, editing one in the Settings UI commits
+one value and touches nothing else. This is the point of the design: the earlier
+`string_map` editor could not offer that (see below).
+
+### The maps (advanced)
+
+`curve_brightness` and `curve_temperature` are still there, behind the
+**Advanced maps** toggle (`show_advanced`, default off), as a power-user escape
+hatch: one row per node, key the reading,
+value the target.
 
 ```toml
 [plugin_settings."zhangdm/als-brightness".curve_brightness]
@@ -71,14 +95,15 @@ key and the target as its value.
 "16384" = "16384:100"
 ```
 
-It is a map rather than a list for one reason: **in-place editing**. Noctalia's
-list editor has no edit callback — its rows are read-only labels with remove and
-move buttons — so a node in a list can only be changed by deleting it and retyping
-it. The map editor renders both cells per row as real inputs, so you edit a node
-where it sits and press Enter (or click away) to commit.
+**A map wins over the sliders exactly when it has been edited** — judged by
+comparing its parsed nodes against the shipped defaults, so re-ordering rows or
+retyping whitespace does not count. As long as it matches the defaults the
+sliders are the curve; the moment you change a node (or add or drop one) the map
+becomes the curve and learning is suspended, because two writers fighting over
+one curve is how a profile goes bad. Delete the row you added to hand the curve
+back to the sliders.
 
-Editing a value, and adding or removing a row, all work in the Settings UI. Two
-habits make it pleasant:
+Two habits make map editing pleasant:
 
 * **Keys are zero-padded** (`"00185"`, not `"185"`). The editor sorts rows by key
   as text, so the padding is what keeps the curve reading in numeric order down
@@ -108,21 +133,25 @@ fresh install behaves sensibly.
 
 ### The learned profile
 
-With `learning_profile` **on**, the plugin fits a curve to the brightness
-adjustments you have made and applies that instead of the node lists. Each band
-takes the **median** of your adjustments in it — median rather than mean, because
-this sensor moves ±10000 counts within a single 50 ms sample — and a band with
-fewer than two adjustments falls back to the node you authored, so a sparse
-profile degrades into the shipped curve rather than into noise.
+With `learning_profile` **on**, learning nudges the **threshold sliders**, never
+the outputs. When you set brightness by hand, the change targets the node whose
+fixed output is nearest the level you chose, and that node's threshold eases
+(EMA, α = 0.125) toward the ambient light you were in — so the curve drifts to
+match where you actually want each level, while its shape stays the one drawn
+above. Two observations move anything at all; a node you have never been near
+stays exactly where you slid it.
 
 The toggle gates **application, never recording**. The plugin always records, so
 switching it on shows a profile that has been developing rather than an empty one.
-That is what makes it useful while working out an initial curve.
+That is what makes it useful while working out an initial curve. Nothing is
+learned while the session is idle — the 30 % idle dim is policy, not a
+preference.
 
 The profile lives in `profile.json` in the plugin's data directory. The plugin
-**cannot write its own settings** — the Noctalia host does not permit it — so
-promoting a learned value into `curve_brightness` is a manual copy. The fitted
-bands use exactly the node positions you authored, so it is a bar-for-bar paste.
+**cannot write its own settings** — the Noctalia host does not permit it — so the
+learned thresholds apply at runtime and are not written back to the sliders; a
+slider you move yourself is the seed learning starts from. (While a `curve_*` map
+is edited and winning, learning is suspended entirely.)
 
 ### Making it seamless: silencing the brightness OSD
 

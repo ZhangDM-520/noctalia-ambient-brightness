@@ -46,8 +46,13 @@ Durable facts about this project. Session-by-session working notes belong in
   (`require("./policy.luau")`), the standalone `luau` interpreter rejects it
   (`require("../policy")`). Both refer to the same file.
 - **Settings render in declaration order**, so the first `[[setting]]` block in the
-  manifest is the first control on the page. `advanced = true` hides a setting
-  behind "show advanced"; `visible_when = { key, values }` gates it conditionally.
+  manifest is the first control on the page. `visible_when = { key, values }` gates
+  a setting live — the pattern the `colortemp` sliders prove. Do NOT use
+  `advanced = true` for a plugin sheet: it defers to the settings window's global
+  Advanced filter, which sits behind the sheet modal and whose
+  `requestContentRebuild()` omits `rebuildEditorSheet`, so an open sheet never
+  refreshes — the setting then shows unconditionally (found the hard way,
+  2026-09-22; the maps now use a plugin-owned `show_advanced` + `visible_when`).
 - **`string_list` renders as a list editor with add, remove and move — and no
   edit.** `ListEditor` has exactly three callbacks (`setOnAddRequested`,
   `setOnRemoveRequested`, `setOnMoveRequested`) and renders each row as a read-only
@@ -69,6 +74,13 @@ Durable facts about this project. Session-by-session working notes belong in
 - **A `string_map` has no array part**, so `#value` is 0 at any size. Guarding
   emptiness with `#value > 0` silently discards the whole setting — use
   `next(value) ~= nil`.
+- **A `string_map` edit masks its sibling rows.** Rows commit to *sub-paths*
+  (`…map.<key>`), but the control's `overridden` flag is `hasEffectiveOverride`
+  on the **whole map path** — so the first row edit stops the manifest default
+  being served and every never-edited sibling vanishes from what the plugin sees.
+  Unfixable from a plugin; **use scalar settings when each item must stay live
+  while the others are edited**. This is why the curve sliders are `int`
+  settings and the maps are an advanced fallback (Phase 6).
 - **`parseFieldType` silently falls back to `String`** for an unrecognised `type`.
   A typo in a setting's `type` does not error anywhere — it quietly changes the
   control. `noctalia plugins lint` is the only guard, so it runs in `run-tests.sh`.
@@ -93,8 +105,12 @@ Durable facts about this project. Session-by-session working notes belong in
 
 - All decision logic lives in the **pure** `curve.luau` / `profile.luau` /
   `policy.luau` / `colortemp.luau` modules; `service.luau` is the only file allowed
-  to touch hardware, the shell or the filesystem. This is what makes 263 checks
+  to touch hardware, the shell or the filesystem. This is what makes 305 checks
   runnable without a display.
+- **Host slider settings: `type = "int"` with `min`/`max`/`step`** (also `double`);
+  the default must lie within [min, max] and `step > 0`. `visible_when = { key,
+  values }` gates a control on another setting — the temperature sliders use
+  `{ key = "colortemp", values = ["true"] }`. Declaration order is render order.
 - **The curve has exactly one implementation.** Phase 2 deleted two
   (`policy.percent_for_raw`, `colortemp.panel_k`) rather than leave them beside the
   new module, because two curves for one job drift apart while both stay tested.
@@ -106,7 +122,15 @@ Durable facts about this project. Session-by-session working notes belong in
   settings page shows is not the number in use. `run-tests.sh` diffs them — and
   diffs the **keys** as well as the values, because the editor sorts rows by key as
   text, so a key that loses its zero-padding reorders the curve on screen without
-  changing a single number.
+  changing a single number. Since Phase 6 the diff also covers the 20 slider
+  defaults and their min/max/step windows against `curve.threshold_window`.
+- **A curve node is (threshold, output): outputs are fixed, sliders choose
+  thresholds.** `curve.buildNodes` pairs, sorts and repairs to strictly
+  increasing x; a slider crossing its neighbour swaps two steps and cannot break
+  the curve. Precedence: an **edited** `curve_*` map wins over the sliders
+  (`curve.map_is_custom` compares parsed nodes, so re-ordering/whitespace is not
+  an edit) and **learning is suspended** while it does. Learning drifts
+  thresholds (EMA toward the observed ambient) and never outputs.
 - **Nothing may be learned while the session is idle.** The 30 % idle dim is
   authored policy, not a preference; both the tick and the `onIpc` handler check
   `S.idle` before recording an observation.

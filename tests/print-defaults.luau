@@ -23,3 +23,17 @@ end
 
 emit("curve_brightness", curve.DEFAULT_BRIGHTNESS)
 emit("curve_temperature", curve.DEFAULT_TEMPERATURE)
+
+-- The 20 threshold sliders: key, default, min, max, step. The windows come from
+-- curve.threshold_window -- the same function the learning clamps to -- so the
+-- manifest literals cannot drift from it silently. %g matches Python's str() for
+-- these integral values.
+local function emit_thresholds(prefix, kind, defaults)
+  for i = 1, #defaults do
+    local lo, hi, step = curve.threshold_window(kind, i)
+    print(string.format("%s_%02d\t%g\t%g\t%g\t%g", prefix, i, defaults[i], lo, hi, step))
+  end
+end
+
+emit_thresholds("thr_brightness", "brightness", curve.DEFAULT_BRIGHTNESS_X)
+emit_thresholds("thr_temperature", "temperature", curve.DEFAULT_TEMPERATURE_X)

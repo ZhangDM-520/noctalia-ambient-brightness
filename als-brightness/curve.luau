@@ -83,6 +83,60 @@ M.DEFAULT_TEMPERATURE = {
   ["06500"] = "6500:6500",
 }
 
+-- ── fixed outputs and default thresholds (Phase 6) ───────────────────────────
+-- The threshold sliders edit WHERE a node sits, never what it puts out: node i
+-- always outputs FIXED_BRIGHTNESS_Y[i] (resp. FIXED_TEMPERATURE_Y[i]) at whatever
+-- ambient reading its slider was moved to. The outputs are constants here, in one
+-- place, and echoed in the slider labels in translations/en.json.
+--
+-- DEFAULT_*_X are the shipped slider positions -- exactly the x half of the maps
+-- above, so a fresh install rebuilds the same curve node for node. Two guards
+-- keep it that way: tests/print-defaults.luau emits these arrays and run-tests.sh
+-- diffs them against plugin.toml's slider defaults and windows, and
+-- tests/curve.test.luau asserts buildNodes(DEFAULT_*_X, FIXED_*_Y) reproduces the
+-- maps above exactly.
+--
+-- Brightness thresholds are raw sensor counts (the slider domain); the log
+-- transform happens later, in buildNodes. Temperature thresholds are ambient K.
+M.FIXED_BRIGHTNESS_Y = { 20.8, 30.7, 39.3, 50.6, 63.4, 70, 78.3, 88.3, 96.8, 100 }
+M.DEFAULT_BRIGHTNESS_X = { 1, 4, 10, 30, 100, 185, 400, 1000, 2200, 16384 }
+
+M.FIXED_TEMPERATURE_Y = { 5100, 5100, 5100, 5380, 5660, 5940, 6220, 6500, 6500, 6500 }
+M.DEFAULT_TEMPERATURE_X = { 2500, 2700, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500 }
+
+--- The min, max and step of one threshold slider, exactly as plugin.toml
+--- declares it. One function for both sides: the manifest literals and the
+--- learning bounds below cannot drift apart silently, because run-tests.sh diffs
+--- them. `kind` is "brightness" or "temperature"; `index` is 1..10.
+---
+--- The windows are deliberately per-node (about a third to triple the default,
+--- +/-500 K for temperature): the brightness range is 4000:1, so one shared
+--- window would be unusable at one end or the other, while radical reshaping
+--- stays possible in the advanced map editors.
+function M.threshold_window(kind, index)
+  local defaults
+  if kind == "brightness" then
+    defaults = M.DEFAULT_BRIGHTNESS_X
+  elseif kind == "temperature" then
+    defaults = M.DEFAULT_TEMPERATURE_X
+  end
+  local d = defaults and defaults[index]
+  if d == nil then return nil end
+
+  if kind == "brightness" then
+    local lo = math.floor(d / 3)
+    if lo < 0 then lo = 0 end
+    local hi = d * 3
+    if hi > 16384 then hi = 16384 end -- the sensor's own ceiling
+    return lo, hi, 1
+  end
+  local lo = d - 500
+  if lo < 1500 then lo = 1500 end
+  local hi = d + 500
+  if hi > 8000 then hi = 8000 end
+  return lo, hi, 50
+end
+
 -- ── parsing ──────────────────────────────────────────────────────────────────
 
 --- Split the raw setting into rows, each with the label the owner sees.
@@ -223,6 +277,100 @@ function M.parse_nodes(items, opts)
   end
 
   table.sort(nodes, function(a, b) return a.x < b.x end)
+  return nodes, problems
+end
+
+--- Has the owner edited a map away from the shipped default? Compared as parsed
+--- nodes, not as text: a re-formatted or re-ordered map that means the same
+--- curve is not an edit, and only a real edit makes the map win over the sliders
+--- (Phase 6 precedence). Pure, so the precedence rule is testable offline.
+function M.map_is_custom(items, defaults)
+  local got = M.parse_nodes(items)
+  local want = M.parse_nodes(defaults)
+  if #got == 0 then
+    -- Nothing parseable is not an edit worth honouring; the sliders take over.
+    return false
+  end
+  if #got ~= #want then return true end
+  for i = 1, #want do
+    if got[i].x ~= want[i].x or got[i].y ~= want[i].y then return true end
+  end
+  return false
+end
+
+--- Build a node list from per-node slider thresholds and fixed outputs (Phase 6).
+--
+-- `thresholds[i]` is the ambient reading the owner slid node i to; `fixed_ys[i]`
+-- is the output that node always puts out. The pairs travel together, so sliding
+-- a node past its neighbour simply swaps two steps of the curve -- the shape is
+-- never in question.
+--
+-- Crossing sliders must not be able to break the interpolation, so after sorting
+-- by threshold the x values are repaired to strictly increasing
+-- (`x[i] = max(x[i], x[i-1] + 1)`). A repair is rare and worth one log line.
+--
+-- `opts.map_x` (optional) transforms the x domain after sorting and repair --
+-- the brightness curve passes log10(x + 1), exactly as parse_nodes does.
+--
+-- Returns `nodes` (ascending, unique x) and `problems`. Like parse_nodes this
+-- never raises: an unusable slider value costs one node and one log line.
+function M.buildNodes(thresholds, fixed_ys, opts)
+  opts = opts or {}
+  local map_x = opts.map_x
+  local nodes, problems = {}, {}
+  if type(thresholds) ~= "table" or type(fixed_ys) ~= "table" then
+    problems[#problems + 1] = "thresholds and outputs must both be lists"
+    return nodes, problems
+  end
+
+  -- Pair each output with its threshold before anything else can reorder them.
+  local n = #fixed_ys
+  if #thresholds ~= n then
+    problems[#problems + 1] = string.format(
+      "%d thresholds for %d fixed outputs (using the first %d of each)",
+      #thresholds, n, math.min(#thresholds, n))
+    n = math.min(#thresholds, n)
+  end
+  for i = 1, n do
+    local x, y = thresholds[i], fixed_ys[i]
+    if not is_finite(x) or not is_finite(y) then
+      problems[#problems + 1] = string.format(
+        "node %d: threshold %s or output %s is not a number (node dropped)",
+        i, tostring(x), tostring(y))
+    else
+      nodes[#nodes + 1] = { x = x, y = y }
+    end
+  end
+
+  table.sort(nodes, function(a, b) return a.x < b.x end)
+
+  local repaired = 0
+  for i = 2, #nodes do
+    if nodes[i].x <= nodes[i - 1].x then
+      nodes[i].x = nodes[i - 1].x + 1
+      repaired = repaired + 1
+    end
+  end
+  if repaired > 0 then
+    problems[#problems + 1] = string.format(
+      "%d threshold(s) collided when sorted; nodes re-spaced to strictly increasing", repaired)
+  end
+
+  if map_x then
+    local kept = {}
+    for i, node in ipairs(nodes) do
+      local mapped = map_x(node.x)
+      if not is_finite(mapped) then
+        problems[#problems + 1] = string.format(
+          "node %d: x=%s is outside the range this curve can use", i, tostring(node.x))
+      else
+        node.x = mapped
+        kept[#kept + 1] = node
+      end
+    end
+    nodes = kept
+  end
+
   return nodes, problems
 end
 

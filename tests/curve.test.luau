@@ -453,6 +453,171 @@ do
     .. " (worst " .. string.format("%.3f", worst) .. " at raw=" .. tostring(worst_raw) .. ")",
     worst < 1.5)
 end
+-- ── buildNodes: the threshold sliders ────────────────────────────────────────
+
+local function fmt_map(nodes)
+  local map = {}
+  for _, node in ipairs(nodes) do
+    map[string.format("%05d", node.x)] = string.format("%g:%g", node.x, node.y)
+  end
+  return map
+end
+
+local function maps_equal(a, b)
+  for k, v in pairs(a) do
+    if b[k] ~= v then return false end
+  end
+  for k in pairs(b) do
+    if a[k] == nil then return false end
+  end
+  return true
+end
+
+do
+  -- The regression guard for the whole phase: the shipped slider defaults must
+  -- rebuild the shipped maps exactly -- keys and values both. If this fails, a
+  -- fresh install would not behave like the curve it replaced.
+  local br_nodes, br_problems =
+    curve.buildNodes(curve.DEFAULT_BRIGHTNESS_X, curve.FIXED_BRIGHTNESS_Y)
+  check("default brightness sliders build 10 nodes", #br_nodes, 10)
+  check("default brightness sliders build without problems", #br_problems, 0)
+  check_true("default brightness sliders rebuild the shipped map exactly",
+    maps_equal(fmt_map(br_nodes), curve.DEFAULT_BRIGHTNESS))
+
+  local tp_nodes, tp_problems =
+    curve.buildNodes(curve.DEFAULT_TEMPERATURE_X, curve.FIXED_TEMPERATURE_Y)
+  check("default temperature sliders build 10 nodes", #tp_nodes, 10)
+  check("default temperature sliders build without problems", #tp_problems, 0)
+  check_true("default temperature sliders rebuild the shipped map exactly",
+    maps_equal(fmt_map(tp_nodes), curve.DEFAULT_TEMPERATURE))
+end
+
+do
+  -- The outputs travel with their slider: sliding node 1 past node 2 swaps two
+  -- steps of the curve, and never reassigns an output to the wrong threshold.
+  local nodes = curve.buildNodes({ 185, 4 }, { 70, 30.7 })
+  check("crossed sliders are re-sorted", #nodes, 2)
+  check("  ...lower threshold first", nodes[1].x, 4)
+  check("  ...output travels with its slider", nodes[1].y, 30.7)
+  check("  ...and the other node follows", nodes[2].y, 70)
+end
+
+do
+  -- Two sliders at the same position cannot both stay there: the second is
+  -- spaced one unit up, and it is reported rather than silently moved.
+  local nodes, problems = curve.buildNodes({ 10, 10, 10 }, { 20.8, 30.7, 39.3 })
+  check("colliding thresholds are repaired to strictly increasing", #nodes, 3)
+  check("  ...one unit apart", nodes[1].x + 1, nodes[2].x)
+  check("  ...and the next one too", nodes[2].x + 1, nodes[3].x)
+  check("a collision is reported once", #problems, 1)
+  check_true("  ...as a collision", problems[1]:find("collided") ~= nil)
+  check_true("the repaired curve still compiles", curve.compile(nodes) ~= nil)
+end
+
+do
+  -- A slider left on a non-number (a hand-edited settings.toml) costs one node,
+  -- exactly like a malformed map row -- never the service.
+  local nodes, problems = curve.buildNodes({ 10, "nonsense", 400 }, { 20.8, 30.7, 78.3 })
+  check("an unusable threshold drops its node", #nodes, 2)
+  check("  ...and reports it", #problems, 1)
+  check_true("the problem names the node", problems[1]:find("node 2") ~= nil)
+  check("the surviving outputs are the right ones", nodes[1].y, 20.8)
+end
+
+do
+  local nodes, problems = curve.buildNodes({ 10, 400 }, { 20.8, 30.7, 78.3 })
+  check("mismatched lengths use the common prefix", #nodes, 2)
+  check("mismatched lengths are reported", #problems, 1)
+  local _, problems2 = curve.buildNodes(42, curve.FIXED_BRIGHTNESS_Y)
+  check("a non-list is reported", #problems2, 1)
+end
+
+do
+  -- map_x runs after the sort and repair, exactly like parse_nodes.
+  local nodes, problems = curve.buildNodes({ 1, 185 }, { 20.8, 70 },
+    { map_x = function(x) return math.log10(x + 1) end })
+  check("map_x is applied", #problems, 0)
+  check("  ...to the first node", nodes[1].x, math.log10(2))
+  check("  ...and the second", nodes[2].x, math.log10(186))
+
+  local dropped, problems3 = curve.buildNodes({ -5, 185 }, { 20.8, 70 },
+    { map_x = function(x) return math.log10(x + 1) end })
+  check("an x map_x cannot map drops the node", #dropped, 1)
+  check("  ...and reports it", #problems3, 1)
+end
+
+do
+  -- The slider windows, in one place: manifest literals and learning bounds both
+  -- come from here (run-tests.sh diffs the manifest against this function).
+  local lo, hi, step = curve.threshold_window("brightness", 1)
+  check("brightness node 1 window min", lo, 0)
+  check("brightness node 1 window max", hi, 3)
+  check("brightness node 1 window step", step, 1)
+  lo, hi, step = curve.threshold_window("brightness", 10)
+  check("the top brightness node is capped at the sensor ceiling", hi, 16384)
+  check("  ...and floors at a third of its default", lo, 5461)
+  lo, hi, step = curve.threshold_window("temperature", 1)
+  check("temperature node 1 window min", lo, 2000)
+  check("temperature node 1 window max", hi, 3000)
+  check("temperature node 1 window step", step, 50)
+  lo, hi, step = curve.threshold_window("temperature", 10)
+  check("temperature node 10 window min", lo, 6000)
+  check("temperature node 10 window max", hi, 7000)
+  check("an unknown kind has no window", curve.threshold_window("nonsense", 1), nil)
+  check("an unknown index has no window", curve.threshold_window("brightness", 11), nil)
+end
+
+do
+  -- Which side wins at reload is decision logic, so it lives here and not in the
+  -- service. A map is "custom" only when its *parsed nodes* differ from the
+  -- shipped defaults -- re-ordering rows or retyping whitespace is not an edit,
+  -- and a map with nothing parseable in it is not an edit either (the sliders
+  -- take over).
+  local function copy_map(src)
+    local out = {}
+    for k, v in pairs(src) do out[k] = v end
+    return out
+  end
+
+  local fresh = copy_map(curve.DEFAULT_BRIGHTNESS)
+  check("the untouched default map is not custom",
+    curve.map_is_custom(fresh, curve.DEFAULT_BRIGHTNESS), false)
+
+  -- the same nodes as a re-ordered, re-whitespaced list: not an edit
+  local reformatted = {}
+  for _, v in pairs(curve.DEFAULT_BRIGHTNESS) do
+    table.insert(reformatted, "  " .. v .. "  ")
+  end
+  check("a re-formatted equivalent list is not custom",
+    curve.map_is_custom(reformatted, curve.DEFAULT_BRIGHTNESS), false)
+
+  local edited_y = copy_map(curve.DEFAULT_BRIGHTNESS)
+  edited_y["00001"] = "1:25"
+  check("an edited output is custom",
+    curve.map_is_custom(edited_y, curve.DEFAULT_BRIGHTNESS), true)
+
+  local edited_x = copy_map(curve.DEFAULT_BRIGHTNESS)
+  edited_x["00001"] = "2:20.8"
+  check("an edited threshold is custom",
+    curve.map_is_custom(edited_x, curve.DEFAULT_BRIGHTNESS), true)
+
+  local extra = copy_map(curve.DEFAULT_BRIGHTNESS)
+  extra["00200"] = "200:75"
+  check("an extra node is custom",
+    curve.map_is_custom(extra, curve.DEFAULT_BRIGHTNESS), true)
+
+  local dropped = copy_map(curve.DEFAULT_BRIGHTNESS)
+  dropped["00001"] = nil
+  check("a dropped node is custom",
+    curve.map_is_custom(dropped, curve.DEFAULT_BRIGHTNESS), true)
+
+  check("garbage-only rows are not an edit",
+    curve.map_is_custom({ "nonsense", "" }, curve.DEFAULT_BRIGHTNESS), false)
+  check("an empty map is not an edit",
+    curve.map_is_custom({}, curve.DEFAULT_BRIGHTNESS), false)
+  check("nil items are not an edit",
+    curve.map_is_custom(nil, curve.DEFAULT_BRIGHTNESS), false)
+end
 
 print(string.format("\n%d checks, %d failure(s)", checks, failures))
 if failures > 0 then

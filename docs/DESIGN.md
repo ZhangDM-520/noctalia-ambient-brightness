@@ -481,6 +481,10 @@ it.
 
 ## 10. Phase 3 — the nodes become editable in place
 
+> **The map editor built here is superseded by §12** as the primary route: it
+> worked, but its host-side override semantics masked sibling rows (§12.1). The
+> analysis below is still correct and the maps survive as an advanced fallback.
+
 The owner's report was that a curve node *"can only be edited by remove and create
 new"*. That was accurate, and the cause turned out to be outside this plugin.
 
@@ -736,3 +740,86 @@ against a `cp -p` backup — and `tomllib` confirms it still parses.
 looked like good news ("the real path is already silent") and was wrong. The fix is not
 a longer delay — it is making the observation redundant and self-checking, so that a
 miss is reported as a miss.
+
+---
+
+## 12. Phase 6 — sliders replace the map as the way to shape the curve
+
+The `string_map` editor of Phase 3 could edit a node in place, but the first
+edit quietly broke every *other* node. The fix is not a patch to the map: it is
+splitting the node in two — **fixed outputs, slider thresholds** — and demoting
+the map to an advanced override.
+
+### 12.1 The masking bug, and why a plugin cannot fix it
+
+Measured in `settings_control_factory.h` / `settings_content_plugins.cpp`: a map
+row commits to its own **sub-path** (`…curve_brightness.00185`), but the control's
+`overridden` flag is `hasEffectiveOverride` on the **whole map path**. The first
+row edit therefore marks the entire map as overridden, the manifest default stops
+being served as the effective value, and every sibling row — which was never
+written anywhere — disappears from what the plugin sees. Editing node 3 blanks
+nodes 1, 2, 4…10.
+
+Nothing in the plugin's reach repairs this: the plugin only reads the resolved
+config, the write happens entirely inside the host UI, and there is no
+per-sub-path override query. **Scalar settings are the fix** — each commits to its
+own path and masks nothing — so the editable surface had to become scalars.
+
+### 12.2 The model: fixed outputs, slider thresholds
+
+A node is a pair `(threshold, output)`. Phase 6 puts the halves in different
+editors:
+
+- **Outputs are fixed constants** (`FIXED_BRIGHTNESS_Y`, `FIXED_TEMPERATURE_Y` in
+  `curve.luau`) — 20.8 % … 100 % and 5100 K … 6500 K, the shipped map values.
+  The shape of the curve is never in question; only where its steps land is.
+- **One `int` slider per node** (`thr_brightness_01..10`,
+  `thr_temperature_01..10`) chooses the threshold. `curve.threshold_window` is
+  the single source for each slider's min/max/step *and* the learning bounds —
+  the manifest literals are diffed against it in `run-tests.sh`, so the two can
+  never drift.
+- `curve.buildNodes(thresholds, fixed_ys, {map_x})` pairs them up, sorts by
+  threshold, repairs collisions to `x[i] = max(x[i], x[i-1] + 1)` (one log line
+  per repair — sliding past a neighbour just swaps two steps), then applies the
+  domain map (`log10(x+1)` for brightness) exactly as `parse_nodes` does.
+
+Sliding past a neighbour cannot break the interpolation because the pair travels
+together; the worst case is a reordered step and a nudge one count apart.
+
+### 12.3 Precedence: an edited map wins
+
+`curve.map_is_custom(items, defaults)` compares **parsed nodes**, not text —
+re-ordering rows or retyping whitespace is not an edit, and a map with nothing
+parseable is not an edit either. The rule at every rebuild:
+
+- map unedited ⇒ sliders (+ learned nudges) are the curve;
+- map edited ⇒ the map is the curve and **learning is suspended** — two writers
+  over one curve is how a profile goes bad, and the owner has declared their
+  intent by hand-editing.
+
+One config log line names which source is active and why.
+
+### 12.4 Learning drifts thresholds, never outputs
+
+A manual brightness change is matched to `target_node` — the node whose **fixed
+output** is nearest the chosen level (ties to the lower index) — and
+`fit_thresholds` eases that node's threshold toward the observed ambient by EMA
+(α = 0.125). Two observations before anything moves; each node drifts
+independently; a node never observed is left exactly where the slider sits;
+every result is clamped into `threshold_window`. The slider values are the seeds
+learning starts from, applied on top at each rebuild (`sliders+learned (N/10
+nodes)` in the source line).
+
+Recording is still ungated (only application is gated), still idle-guarded, and
+still cannot write config — the learned thresholds live in `profile.json` and are
+applied at runtime only.
+
+### 12.5 Verification
+
+The drift check now covers **40 rows** — the 20 map nodes and the 20 slider
+defaults/windows — and `tests/curve.test.luau` asserts
+`buildNodes(DEFAULT_*_X, FIXED_*_Y)` reproduces each shipped map exactly, so
+"slider defaults rebuild the shipped curves" is a tested fact rather than a hope.
+Precedence is tested offline (`map_is_custom`: identical, re-formatted, edited x,
+edited y, extra row, dropped row, garbage-only, empty). Suite totals: 41 policy
++ 44 colortemp + 157 curve + 63 profile = **305 checks, 0 failures**.
