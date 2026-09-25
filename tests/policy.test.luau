@@ -1,5 +1,5 @@
 --!nonstrict
--- Pure-function tests for src/policy.luau.  Run from the repo root:
+-- Pure-function tests for als-brightness/policy.luau.  Run from the repo root:
 --     luau tests/policy.test.luau
 -- No host API, no hardware, no clock: everything is injected.
 
@@ -147,7 +147,7 @@ check("zero max yields nil", policy.percent_of(1, 0), nil)
 print(string.format("\n%d checks, %d failure(s)", checks, failures))
 if failures > 0 then
   -- Luau's standalone interpreter has no `os` library (verified: `os` is nil),
-  -- which is also why src/service.luau must take its clock from
+  -- which is also why als-brightness/service.luau must take its clock from
   -- noctalia.nowMs() rather than os.time().
   error(string.format("%d check(s) failed", failures), 0)
 end

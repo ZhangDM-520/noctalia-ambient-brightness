@@ -1,5 +1,5 @@
 --!nonstrict
--- Pure-function tests for src/curve.luau.  Run from the repo root:
+-- Pure-function tests for als-brightness/curve.luau.  Run from the repo root:
 --     luau tests/curve.test.luau
 -- No host API, no hardware, no clock.
 

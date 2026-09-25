@@ -3,7 +3,7 @@
 --
 -- Nothing in this module touches the host API, sysfs or the clock, so the whole
 -- thing runs under a bare `luau` interpreter and is exercised by tests/policy.test.luau.
--- src/service.luau is the only place that reads hardware and talks to Noctalia.
+-- als-brightness/service.luau is the only place that reads hardware and talks to Noctalia.
 --
 -- Every constant below is traceable to a measurement recorded in
 -- docs/DESIGN.md and .copilot session files/probe-evidence.md.

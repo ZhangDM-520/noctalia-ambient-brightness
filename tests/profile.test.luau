@@ -1,5 +1,5 @@
 --!nonstrict
--- Pure-function tests for src/profile.luau.  Run from the repo root:
+-- Pure-function tests for als-brightness/profile.luau.  Run from the repo root:
 --     luau tests/profile.test.luau
 -- No host API, no hardware, no clock, no file IO.
 
