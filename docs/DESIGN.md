@@ -7,9 +7,11 @@ below as *measurement evidence only* — at runtime the plugin discovers each
 machine's devices fresh (§13), so nothing here assumes yours match.
 Where a measurement corrected the original plan, that is stated
 explicitly — the corrections are the most useful part of this document.
+For the current-state module map, glossary and decision records, start at
+`docs/CURRENT.md`; this document is the phase-by-phase history.
 
-Raw evidence, including the probe plugin's run log and the sensor traces, lives
-in the session record (`files/probe-evidence.md` and friends).
+Raw evidence (the probe plugin's run log and sensor traces) was captured in the
+session record during development and is not checked in.
 
 ---
 
@@ -258,6 +260,11 @@ would teach the adapter that 30 % is what the user wants.
 ---
 
 ## 6. Colour temperature
+
+> **Superseded in part (Phase 2, §9).** The two-anchor linear ramp described
+> below was replaced by the PCHIP curve in `curve.luau` (`curve_temperature`).
+> What survives unchanged: the route (drive Noctalia's night light), the splice
+> discipline and its two corruption fixes.
 
 **Route A — drive Noctalia's own night light — chosen, and it needed no new
 dependency.** The plan expected this to be impossible ("no runtime temperature
@@ -557,7 +564,8 @@ ultimately land is the one *unverified* link in that chain (open question 4).
 
 ## 8. Verification status
 
-`./run-tests.sh` — 263 checks, no hardware required, plus `noctalia plugins lint`
+`./run-tests.sh` — 263 checks at the time of writing (Phase 1; the suite is 366
+as of Phase 7, see docs/CURRENT.md), no hardware required, plus `noctalia plugins lint`
 and a check that the manifest and code ship the same curve defaults. Verified live
 on the machine:
 
@@ -591,6 +599,9 @@ on the machine:
 | Only the brightness kind is affected | `volume-osd` still showed with the line in place (2/3), so no OSD was left globally suppressed |
 | The config edit is additive and parses | diff vs a `cp -p` backup: 7 added lines, 0 removed; `tomllib` reads `osd.kinds = {'brightness': False}` |
 | The plugin is unaffected | `config: brightness=10 nodes temperature=10 nodes`, `target=70.2` at raw 188, `observations=0`, profile.json absent |
+
+This table records the Phase 1 verification run. Later phases verify in §10.6,
+§12.5 and §13; §6.1 adds measured temporal behaviour of the adaptation.
 
 The lesson worth carrying forward: **every one of the four real defects found in
 this work was found by running it, not by reading.** The `pluginDir` function
@@ -1048,7 +1059,8 @@ defaults/windows — and `tests/curve.test.luau` asserts
 "slider defaults rebuild the shipped curves" is a tested fact rather than a hope.
 Precedence is tested offline (`map_is_custom`: identical, re-formatted, edited x,
 edited y, extra row, dropped row, garbage-only, empty). Suite totals: 41 policy
-+ 44 colortemp + 157 curve + 63 profile = **305 checks, 0 failures**.
++ 44 colortemp + 157 curve + 63 profile = **305 checks, 0 failures** (Phase 6;
+366 as of Phase 7).
 
 ## 13. Phase 7 — hardware availability: probe before load
 

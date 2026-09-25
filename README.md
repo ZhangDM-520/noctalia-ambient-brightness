@@ -3,6 +3,8 @@
 Ambient-light adaptive panel brightness for Linux, implemented as a
 [Noctalia](https://noctalia.dev) plugin service.
 
+Maintainers: start at `docs/CURRENT.md` (module map, glossary, decision records).
+
 The panel follows the light in the room — and the moment you touch the
 brightness keys, it gets out of the way, because a manual adjustment is treated
 as intent rather than as an error to be corrected.
@@ -219,9 +221,10 @@ problem; the change callback is, and it fires for every writer.
 ./run-tests.sh
 ```
 
-263 checks over the pure decision logic. No hardware, no clock, no shell needed —
+366 checks over the pure decision logic. No hardware, no clock, no shell needed —
 which is the reason all the logic lives in `policy.luau`, `curve.luau`,
-`profile.luau` and `colortemp.luau` rather than in the service entry point.
+`profile.luau`, `colortemp.luau` and `hardware.luau` rather than in the service
+entry point.
 
 The script also runs `noctalia plugins lint` (the only guard against an
 unrecognised setting `type`, which the host silently degrades to a plain string),
@@ -232,11 +235,14 @@ settings page and the code cannot disagree about the shipped curve.
 
 | Path | Role |
 | --- | --- |
-| `als-brightness/service.luau` | The `[[service]]` entry point. The only file that touches hardware, the shell or the filesystem. |
+| `docs/CURRENT.md` | **Start here.** Current-state module map, glossary and decision records for maintainers. |
+| `als-brightness/service.luau` | The `[[service]]` entry point. The only file that directly touches hardware, the shell or the filesystem (everything else gets it through seams). |
+| `als-brightness/hardware.luau` | Pure (injected IO): hardware discovery (`discover(env, opts)` scans iio, backlight, connector, DPMS, lid and HOME, and decides degraded vs missing before anything loads). |
 | `als-brightness/curve.luau` | Pure: the user-owned curves, PCHIP interpolation, node parsing. |
 | `als-brightness/profile.luau` | Pure: the learned profile — recording, band fitting, defensive loading. |
 | `als-brightness/policy.luau` | Pure brightness policy: stabiliser, slew, dead-band, override window, guards. |
 | `als-brightness/colortemp.luau` | Pure: the temperature guard rail and the `settings.toml` splice. |
-| `tests/` | Unit tests for the four pure modules. |
-| `docs/DESIGN.md` | Every decision, and the measurement behind it. |
+| `als-brightness/translations/en.json` | Settings-row titles and descriptions (loaded at plugin load). |
+| `tests/` | Unit tests for the five pure modules (curve, policy, profile, colortemp, hardware). |
+| `docs/DESIGN.md` | Phase-by-phase design history: every decision and the measurement behind it. Current state lives in docs/CURRENT.md. |
 | `catalog.toml` | Makes this repository installable as a plugin source. |

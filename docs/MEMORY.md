@@ -1,9 +1,16 @@
 # MEMORY
 
 Durable facts about this project. Session-by-session working notes belong in
-`NOTE.md`; this file should only hold things that stay true.
+`NOTE.md`; this file should only hold things that stay true. The maintainer-facing
+current state of the plugin lives in `CURRENT.md`.
+
+Facts here are either about the reference machine or rules the code enforces;
+each section says which.
 
 ## Environment facts this project depends on
+
+Reference-machine evidence. The plugin discovers devices at runtime
+(`hardware.luau`); these are what was measured, not assumptions the code makes.
 
 - **On the reference machine the ambient sensor is `iio:device2`, `name = als`**
   (AMD SFH, `HID-SENSOR-200041`). `lux = in_illuminance_raw / 10`. Reads are **0.03 ms**
@@ -28,7 +35,7 @@ Durable facts about this project. Session-by-session working notes belong in
   into `~/.config/noctalia/config.toml` by `nri-idle install`. Edit the fragment,
   never the generated block.
 
-## Noctalia plugin API facts (measured, not from docs)
+## Noctalia plugin API facts (measured, not from docs; reference host: Noctalia 5.1.0)
 
 - `plugin_api` levels are **cumulative**: 23 = `async-file-read`,
   24 = `direct-argv`. This plugin declares 24.
@@ -107,6 +114,8 @@ Durable facts about this project. Session-by-session working notes belong in
 
 ## Project conventions
 
+Rules the code and tests enforce on any machine.
+
 - All decision logic lives in the **pure** `curve.luau` / `profile.luau` /
   `policy.luau` / `colortemp.luau` modules; `service.luau` and `hardware.luau`
   are the only files allowed to touch hardware, the shell or the filesystem —
@@ -119,16 +128,18 @@ Durable facts about this project. Session-by-session working notes belong in
 - **The curve has exactly one implementation.** Phase 2 deleted two
   (`policy.percent_for_raw`, `colortemp.panel_k`) rather than leave them beside the
   new module, because two curves for one job drift apart while both stay tested.
+  (DESIGN §9.4)
 - **Curve interpolation is PCHIP**, never a straight line and never a naive cubic.
   The no-overshoot property is asserted **per interval** in
   `tests/curve.test.luau`; a global-range check is too weak and was measured
-  passing a curve that overshot by 5.93 points.
+  passing a curve that overshot by 5.93 points. (DESIGN §9.2)
 - **The manifest defaults and the code defaults must agree**, or the number the
   settings page shows is not the number in use. `run-tests.sh` diffs them — and
   diffs the **keys** as well as the values, because the editor sorts rows by key as
   text, so a key that loses its zero-padding reorders the curve on screen without
   changing a single number. Since Phase 6 the diff also covers the 20 slider
   defaults and their min/max/step windows against `curve.threshold_window`.
+  (DESIGN §9, §10)
 - **A curve node is (threshold, output): outputs are fixed, sliders choose
   thresholds.** `curve.buildNodes` pairs, sorts and repairs to strictly
   increasing x; a slider crossing its neighbour swaps two steps and cannot break
@@ -144,19 +155,23 @@ Durable facts about this project. Session-by-session working notes belong in
   temp paths): duplicated outputs used to carry the flat floor/ceiling runs
   and owners read the repeats as a bug — the flats belong under the hood,
   where PCHIP's zero tangent works invisibly (14 compiled / 10 visible).
+  (DESIGN §12.2, §12.3, §12.4)
 - **Nothing may be learned while the session is idle.** The 30 % idle dim is
   authored policy, not a preference; both the tick and the `onIpc` handler check
-  `S.idle` before recording an observation.
+  `S.idle` before recording an observation. (DESIGN §4)
 - **Time in the pure modules is SECONDS.** `noctalia.nowMs()` is milliseconds;
   convert once at the boundary. Mixing them silently makes every timeout fire
-  immediately.
+  immediately. (DESIGN §5)
 - The **clock is a parameter**, never read inside the pure modules.
 - Editing a user's TOML: **splice as text, never parse and re-serialise**, and
   return the input byte-for-byte when nothing changes. Same rule as `nri-idle`.
+  (DESIGN §6)
 - Toolchain: `luau-compile` for syntax, `luau-analyze` for lint, `./run-tests.sh`
   for the lot.
 
 ## Downstream integration
+
+Project rules for the surrounding config (integration contract, any machine).
 
 This plugin's idle handshake requires the `dim` behaviour in
 `~/.config/nri-idle/idle.toml` to emit `idle-engaged` before dimming and
@@ -167,7 +182,7 @@ The brightness keys additionally emit `user-adjusted`. That event is now ignored
 while the session is idle, because the panel is not showing what the owner asked
 for at that moment.
 
-## Silencing an OSD (measured 2026-09-22, Noctalia 5.1.0)
+## Silencing an OSD (reference-host evidence, measured 2026-09-22 on Noctalia 5.1.0)
 
 * **Every OSD passes one choke point with two gates**, in `OsdOverlay::show()`:
   `if (!isEnabled()) return;` (the runtime override set by `noctalia msg osd-disable` /
@@ -191,7 +206,7 @@ for at that moment.
 * Useful cross-check that is *not* brightness: `noctalia msg volume-osd <n>` renders the
   volume OSD, so it proves gate 1 was not left stuck off by a test.
 
-## Measuring a transient UI effect (learned the hard way)
+## Measuring a transient UI effect (reusable technique, learned the hard way)
 
 A single screenshot at a fixed delay is **not** evidence, and a negative from one is not a
 measurement. A brightness OSD was invisible at 0.7 s while being clearly present at 0.15 s
@@ -214,7 +229,7 @@ The method that works, for any transient on-screen effect:
 5. **Always include a causation control.** Removing the change and watching the effect
    return is what separates correlation from cause.
 
-## Hardware discovery (Phase 7)
+## Hardware discovery (Phase 7: rules the code enforces)
 
 - **Never hardcode device paths.** `iio:device2`, `card1-eDP-1`, `LID`,
   `amdgpu_bl1`, `/home/zhangdm` were all true only on one machine. Every path now

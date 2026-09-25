@@ -2,6 +2,18 @@
 
 Working notes, newest last. Durable facts belong in `MEMORY.md`.
 
+| entry (heading + date) | what it settled | where the durable version lives now |
+| --- | --- | --- |
+| 2026-09-22: Phase 6: sliders replace the map as the primary curve editor | 20 threshold sliders become the primary curve editor; maps demote to an advanced fallback; learning drifts thresholds, never outputs | DESIGN.md §12 + MEMORY.md Project conventions |
+| Advanced-toggle fix (2026-09-22) | plugin-owned `show_advanced` + `visible_when` replaces the host's global Advanced filter | README.md "The maps (advanced)" + `plugin.toml` `show_advanced` |
+| Hardware availability (Phase 7, 2026-09-22) | runtime device discovery in `hardware.luau`; required-missing vs degraded split | DESIGN.md §13 + MEMORY.md Hardware discovery |
+| Temp-label disambiguation (2026-09-22) | bare node-id titles, mapping in the description, never a value in a title | MEMORY.md Project conventions (titles) + `translations/en.json` descriptions |
+| Temperature curve restructure: 14 under the hood / 10 visible (2026-09-22) | unique output ladder plus 4 hidden anchors; 14 compiled / 10 visible | DESIGN.md §12 + MEMORY.md (14/10 rule) |
+| Research: §6.1 temporal behaviour of the adaptation (2026-09-22) | measured temporal behaviour and the smoothing recommendation | DESIGN.md §6.1 |
+| Architecture review + docs legibility pass (2026-09-25) | six churn-ranked deepening candidates (A–F) from `/improve-codebase-architecture`; docs-only wave: CURRENT.md read-first map + era-stamped history | docs/CURRENT.md (docs outcome); this entry (code candidates deferred) |
+
+New entries go at the bottom; update this index in the same commit.
+
 ## 2026-09-22 — Phase 6: sliders replace the map as the primary curve editor
 
 **Goal.** The `string_map` node editor masked sibling rows on the first edit
@@ -37,7 +49,8 @@ nudges thresholds (EMA) not outputs.
    against `plugin.toml` — **40 rows must agree**.
 6. Tests: `map_is_custom` suite added (identical, re-formatted, edited x, edited
    y, extra row, dropped row, garbage-only, empty). Totals 41 policy + 44
-   colortemp + 157 curve + 63 profile = **305 checks, 0 failures**.
+   colortemp + 157 curve + 63 profile = **305 checks, 0 failures** (the suite
+   then; 366 since the temperature-curve restructure).
 7. Docs: README (slider model, maps-as-advanced, precedence, threshold
    learning), DESIGN.md §12, MEMORY.md (masking + slider facts).
 
@@ -82,7 +95,8 @@ the `colortemp` sliders already prove live. `advanced = true` removed: the host'
 advanced filter runs *before* `visible_when`, so keeping it would hide the maps
 whenever the global filter is off (unreachable from the sheet). `en.json` +2 keys
 (60 total), 30 settings, declaration order unchanged otherwise.
-`./run-tests.sh`: 305 checks, 0 failures.
+`./run-tests.sh`: 305 checks, 0 failures (the suite then; 366 since the
+temperature-curve restructure).
 
 ## Hardware availability (Phase 7, 2026-09-22)
 
@@ -100,8 +114,9 @@ re-probing CPU cost; toggle the plugin to re-probe). `connector` default
 `eDP-1` -> `""` (auto, validated against `noctalia.outputs()`), descriptions
 note "restart after changing".
 
-**Verified.** run-tests.sh 345 checks 0 failures (40 new in
-tests/hardware.test.luau across 13 fake machines); live: full probe report
+**Verified.** run-tests.sh 345 checks 0 failures at the time (the suite is 366
+since the temperature-curve restructure; 40 new in tests/hardware.test.luau
+across 13 fake machines); live: full probe report
 logged, forced backlight `not_here` idled with the reason, restore recovered
 adaptation.
 
@@ -113,8 +128,9 @@ nodes sharing threshold 6500 K, suggesting a broken mapping.
 **Diagnosis: text-only.** Row titles echo the fixed **output**
 (`FIXED_TEMPERATURE_Y` — the intentional 6500 K flat ceiling, nodes 1-3 the
 5100 K floor); the description described the **slider** (ambient threshold).
-Thresholds were always distinct and the curve monotone — 345 checks green
-incl. `buildNodes(DEFAULT_X, FIXED_Y)` ≡ default map. Rejected: thresholds in
+Thresholds were always distinct and the curve monotone — 345 checks green then
+(366 since the temperature-curve restructure) incl. `buildNodes(DEFAULT_X,
+FIXED_Y)` ≡ default map. Rejected: thresholds in
 titles (static text, stale after any slider move).
 
 **Fix.** 20 en.json descriptions now name both quantities ("Where this step
@@ -190,3 +206,50 @@ threshold, HDR colorimeter, real torch trace, reload cost with Settings open).
 
 **Artifacts.** DESIGN.md +§6.1 (~180 lines); this journal entry. No code
 touched; run-tests.sh not required (docs-only) but suite unaffected (366).
+
+## Architecture review + docs legibility pass (2026-09-25)
+
+**Review.** `/improve-codebase-architecture` over the whole repo produced an
+HTML report at `/tmp/architecture-review-20260925.html`, ranking deepening
+candidates by churn. Six candidates, in that order:
+
+- **A — collapse curve-source resolution into one module.** "Which curve is
+  live" (edited map vs sliders + learned nudges) is one decision spread across
+  `service.luau` (`setting_thresholds`, `load_slider_curve`, `rebuild_active`);
+  one module should answer it.
+- **B — one settings-surface module behind plugin.toml/en.json/curve.luau.**
+  The 30 settings, their row text and their slider windows are one fact in
+  three files that `run-tests.sh` diffs to keep honest; one owner would make
+  disagreement impossible.
+- **C — a docs/CURRENT.md read-first document.** *Done in this pass.*
+- **D — the hardware report should carry its guard-state semantics.**
+  `discover()` returns paths and reason lists, and `service.luau` re-derives
+  "may I write right now?" from them; the report already implies the decision
+  and should carry it.
+- **E — an adaptation-session `decide()` module with an injected clock.** The
+  tick's ordering (guard → override → adapt → record) and the ms→s conversions
+  live in `service.luau`; a pure `decide(session, input, now_s)` would put the
+  whole policy under the test suite.
+- **F — temperature write-path state machine + `curve.luau` accretion.**
+  splice → write → `config-reload` → read back is open-coded at each call with
+  its own failure handling, and `curve.luau` has accreted parse / build /
+  anchors / domain-map duties worth splitting.
+
+**Docs pass (this wave — docs only).** `docs/CURRENT.md` created as the
+read-first map (module map, glossary, decision records, what is deliberately
+not here). README / DESIGN / MEMORY / NOTE repaired: check counts era-stamped
+(no bare stale totals left), an explicit superseded callout on DESIGN §6 (§3
+and §10 carry theirs too) so the history reads as history, the dangling
+`files/probe-evidence` link replaced with the statement that raw evidence is
+not checked in, and the glossary and decision records that previously existed
+nowhere.
+
+**Plan.** Candidates A/B/D/E/F are **not** implemented in this wave. They land
+in later waves, after the power-measurement baseline — the baseline is what the
+next write-cadence and smoothing decision must be measured against, so it comes
+first.
+
+**Verified.** `./run-tests.sh` 366 checks 0 failures (41 policy + 44 colortemp
++ 178 curve + 63 profile + 40 hardware), lint and manifest lint clean,
+"plugin.toml and curve.luau ship the same 40 nodes" ok, catalog/plugin version
+0.4.0 agree. The luau diffs in this wave are comment-only.
