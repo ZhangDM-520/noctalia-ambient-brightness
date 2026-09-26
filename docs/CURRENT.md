@@ -38,7 +38,7 @@ before opening a file — the depth note says where the fix belongs.
 | `hardware.luau` | `discover(env, opts)` with injected IO (`listDir`/`readFile`/`outputs`/`getenv`): every device path the plugin uses, probed once at start. | The deepest seam. Tests run fake machines through it (13 machine shapes). |
 | `translations/en.json` | Settings-row text (labels and descriptions). | Shallow data. |
 | `plugin.toml` | Manifest: 30 settings, defaults, `visible_when` gating, slider windows. | Shallow data, but its defaults must agree with `curve.luau`. |
-| `tests/` | 366 checks across 5 test files (`curve`, `policy`, `profile`, `colortemp`, `hardware`) plus the `print-defaults.luau` helper. | Exercises only the pure modules and the hardware seam. |
+| `tests/` | 839 checks across 7 test files (`curve`, `curve_source`, `settings_spec`, `policy`, `profile`, `colortemp`, `hardware`) plus the `print-defaults.luau` helper. | Exercises only the pure modules and the hardware seam. |
 | `run-tests.sh` | Syntax (`luau-compile`), lint (`luau-analyze`), manifest lint (`noctalia plugins lint`), defaults agreement (40 nodes + slider windows), catalog version. | The whole offline gate; run it before committing. |
 
 Dependency direction: the pure modules never touch IO and never read the clock —

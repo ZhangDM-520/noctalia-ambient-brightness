@@ -1077,7 +1077,9 @@ Phase 7 moves all of it behind one module, `hardware.luau`:
   (`listDir` / `readFile` / `outputs` / `getenv`), `opts` carries the raw
   `backlight` / `connector` settings. The report carries `paths` (each resolved
   or nil), `devices` (names for the startup log), `required_missing` and
-  `degraded` (human-readable reason lists).
+  `degraded` (human-readable reason lists), and `guard_state(env)` — the runtime
+  guard inputs (`dpms` / `lid_closed`) with the unavailable-guard-passes
+  decision folded in, read through the same injected env.
 - **Seam:** two adapters make it real — the Noctalia environment (service.luau)
   and a fake machine (tests/hardware.test.luau: 40 checks over 13 machine
   shapes: no sensor, `in_illuminance_input` fallback, raw-beats-input across

@@ -6,19 +6,26 @@
 -- fake machine can replace it in tests. All decision logic lives in pure modules,
 -- which run under a bare `luau` and are unit-tested offline:
 --
---   hardware.luau   device discovery: every path the service uses, probed at start
---   policy.luau     temporal shaping, the override window, the guards
---   curve.luau      the user-owned mapping curves (PCHIP interpolation)
---   profile.luau    the learned profile fitted from the owner's overrides
---   colortemp.luau  the night-light config splice and its guard rail
+--   hardware.luau    device discovery: every path the service uses, probed at start
+--   adaptation.luau  the adaptation session: what to DO this tick (the
+--                    idle/override/learning timeline, decide() with an
+--                    injected clock)
+--   policy.luau      temporal shaping, the override window, the guards
+--   curve.luau       the user-owned mapping curves (PCHIP interpolation)
+--   curve_source.luau  which curve is live, and why: config readers, precedence,
+--                    learned nudges, and every curve log line (one report)
+--   profile.luau     the learned profile fitted from the owner's overrides
+--   colortemp.luau   the night-light config splice and its guard rail
 --
--- What is left here is a thin, boring shim: read settings, read sysfs, call the
--- pure functions in the right order, write the result out.
+-- What is left here is a thin, boring shim: read settings and sysfs into one
+-- snapshot, hand it to adaptation.decide() with the injected clock, and perform
+-- the returned actions (IO only) in order.
 --
 -- Design notes and the measurements behind every constant: docs/DESIGN.md.
 
 local policy = require("./policy.luau")
-local curve = require("./curve.luau")
+local adaptation = require("./adaptation.luau")
+local curve_source = require("./curve_source.luau")
 local colortemp = require("./colortemp.luau")
 local profile = require("./profile.luau")
 local hardware = require("./hardware.luau")
@@ -26,11 +33,13 @@ local hardware = require("./hardware.luau")
 -- ── hardware report ─────────────────────────────────────────────────────────
 -- Every device path is resolved ONCE by hardware.discover() at start (the start
 -- block at the bottom of this file): no path, device number or connector is ever
--- guessed here. Until the probe runs they are nil, and while a required device is
--- missing HW_OK stays false and every entry point returns early.
-local ALS_RAW, ALS_CT, DPMS, LID, SETTINGS_PATH
+-- guessed here, and the report stays their single home -- reads go through
+-- HW.paths.* / HW.devices.* rather than through copies that could drift. Until
+-- the probe runs HW is nil, and while a required device is missing HW_OK stays
+-- false and every entry point returns early.
+local HW  -- the full discovery report: paths, devices, reason lists, guard_state
 local HW_OK = false
-local HW  -- the full discovery report
+local HW_ENV  -- injected env, shared by the probe and the per-tick guard reads
 
 -- ── config ───────────────────────────────────────────────────────────────────
 -- Every reader tolerates the wrong type rather than trusting the stored config,
@@ -55,40 +64,16 @@ local function setting_string(key, fallback)
   return fallback
 end
 
---- The curves arrive as a `string_map` (the in-place-editable shape) or as a
---- `string_list`. A bare string is accepted as a one-row list, so a hand-edited
---- config cannot silently disable a whole curve.
----
---- The emptiness test is `next()`, not `#value`: a map keyed "00185" has no integer
---- keys, so `#value` is 0 for a map of any size and an `#value > 0` guard would
---- throw away every curve the GUI produced.
-local function setting_nodes(key, fallback)
-  local value = noctalia.getConfig(key)
-  if type(value) == "table" then
-    if next(value) ~= nil then return value end
-    return fallback
+-- The curve keys ("curve_brightness", "thr_brightness_01".."thr_temperature_10",
+-- "learning_profile") are read by curve_source.luau, which owns their tolerance
+-- rules; the snapshot below is the only thing this file does with them.
+local function snapshot_settings()
+  local settings = {}
+  for _, key in ipairs(curve_source.setting_keys()) do
+    settings[key] = noctalia.getConfig(key)
   end
-  if type(value) == "string" and value ~= "" then return { value } end
-  return fallback
+  return settings
 end
-
---- The 20 threshold sliders ("thr_brightness_01".."thr_temperature_10"). Each
---- commits to its own config path, so a GUI edit of one slider never masks its
---- siblings -- which is exactly what the string_map editors do (the host marks
---- the whole map overridden on the first row edit), and why the maps are demoted
---- to advanced fallbacks. Out-of-window values from a hand-edited config are
---- honoured as written; buildNodes repairs whatever would break the
---- interpolation and logs it once.
-local function setting_thresholds(prefix, defaults)
-  local out = {}
-  for i = 1, #defaults do
-    out[i] = setting_number(string.format("%s_%02d", prefix, i), defaults[i])
-  end
-  return out
-end
-
---- Has the owner edited a map away from the shipped default? That decision lives
---- in curve.map_is_custom (Phase 6 precedence): pure, and testable offline.
 
 -- ── logging ──────────────────────────────────────────────────────────────────
 -- writeFile replaces the file, so keep a bounded ring buffer in memory and rewrite
@@ -124,31 +109,35 @@ end
 -- ── config-derived state ─────────────────────────────────────────────────────
 local CFG = {}
 for k, v in pairs(policy.DEFAULTS) do CFG[k] = v end
+-- CFG.enabled / CFG.colortemp_enabled are filled by reload() below.
 
-local CONNECTOR, ENABLED, COLORTEMP, LEARNING
--- The slider positions (thresholds, raw domain) currently in force, in slider
--- order. Learning seeds from these and drifts them, so promoting a learned value
--- back into the settings page is a bar-for-bar copy.
-local THR_BR, THR_TEMP = {}, {}
--- The compiled curves: slider-built by default, the advanced map when edited.
-local CURVE_BR, CURVE_TEMP = nil, nil
-local COUNT_BR, COUNT_TEMP = 0, 0
-local BR_CUSTOM_MAP, TEMP_CUSTOM_MAP = false, false
--- What the tick actually evaluates: the slider curve, optionally with learned
--- threshold nudges layered on (never on a custom map -- see rebuild_active).
-local ACTIVE_BR = nil
-local LEARNED_NODES = 0
-local PROF_CFG_BR = nil
-local CURVE_SOURCE = "sliders"
-
---- The brightness curve is interpolated in log10(raw + 1). Not cosmetic: the
---- measured range is ~4000:1 (4 .. 16653 raw), so a linear axis would collapse
---- everything below ~1000 raw into a single step.
-local function map_brightness_x(x)
-  return math.log10(x + 1)
-end
-
-local PROF = profile.new()
+-- ── the adaptation session ───────────────────────────────────────────────────
+-- One explicit state table, owned by adaptation.decide()'s timeline: what the
+-- session has seen (log, last_written, override, idle, locked, last_reason) and
+-- what it has done (last_ms, applied_k, last_temp_s). The learned profile and
+-- the curve-source report live here too, because decide() records observations
+-- and rebuilds the curves as part of the decision. Two fields are written by
+-- THIS file from IO outcomes, never by decide(): `locked` (the async status
+-- poll below) and `applied_k`/`last_temp_s` (the temperature splice results).
+--
+-- cs is the curve-source report from curve_source.resolve(): which curve the
+-- tick evaluates, and why. curve_settings is one snapshot of the curve config
+-- keys, so the per-observation rebuild re-lays learned nudges on the exact
+-- thresholds reload() saw instead of re-reading config mid-flight.
+local SESSION = {
+  log = nil,            -- stabilised log10 reading
+  last_written = nil,   -- percent we last commanded
+  override = nil,       -- {raw=, percent=, at=} -- at in SECONDS
+  idle = false,         -- set by the idle handshake, not inferred
+  locked = false,       -- refreshed by a slow poll
+  last_reason = nil,
+  last_ms = nil,        -- injected clock, MILLISECONDS
+  applied_k = nil,      -- night-light temperature we last wrote
+  last_temp_s = nil,
+  profile = profile.new(),
+  curve_settings = {},
+  cs = nil,
+}
 
 local function load_profile()
   local text = noctalia.readFile(PROFILE_PATH)
@@ -159,7 +148,7 @@ local function load_profile()
     log("profile: cannot parse " .. PROFILE_PATH .. "; starting a fresh one")
     return
   end
-  PROF = profile.sanitise(decoded)
+  SESSION.profile = profile.sanitise(decoded)
 end
 
 local LAST_SAVE_S = nil
@@ -172,8 +161,8 @@ local function save_profile(now_s, force)
   if not force and LAST_SAVE_S ~= nil and (now_s - LAST_SAVE_S) < 2 then
     return
   end
-  PROF.updated_at = math.floor(now_s)
-  local ok, encoded = pcall(noctalia.json.encode, PROF)
+  SESSION.profile.updated_at = math.floor(now_s)
+  local ok, encoded = pcall(noctalia.json.encode, SESSION.profile)
   if not ok or encoded == nil then return end
   if noctalia.writeFile(PROFILE_PATH, encoded) then
     DIRTY = false
@@ -181,163 +170,27 @@ local function save_profile(now_s, force)
   end
 end
 
---- Learning clamps its nudges into each slider's own window
---- (curve.threshold_window), so a learned threshold can always be copied back
---- into the GUI without being clipped by the slider's own min/max.
-local function fit_bounds(kind)
-  local lo, hi = {}, {}
-  for i = 1, #curve.FIXED_BRIGHTNESS_Y do
-    local w_lo, w_hi = curve.threshold_window(kind, i)
-    lo[i], hi[i] = w_lo, w_hi
-  end
-  return { lo = lo, hi = hi }
-end
-
---- What the tick evaluates: the slider-built curve, with learned threshold nudges
---- layered on when learning is on. Outputs never move (they are the fixed
---- constants in curve.luau); only where each node sits does.
----
---- Runs on every observation, so it never logs -- slider build problems are
---- logged once, in reload().
-local function rebuild_active()
-  LEARNED_NODES = 0
-  if BR_CUSTOM_MAP then
-    -- A custom map is the power-user override and wins outright. Learning is
-    -- suspended on purpose (decision locked): nudging thresholds would silently
-    -- fight the curve the owner wrote by hand.
-    ACTIVE_BR = CURVE_BR
-    CURVE_SOURCE = "map (custom, learning suspended)"
-    return
-  end
-
-  local xs = THR_BR
-  if LEARNING then
-    local fitted, counts = profile.fit_thresholds(
-      PROF, curve.FIXED_BRIGHTNESS_Y, THR_BR, PROF_CFG_BR)
-    xs = fitted
-    LEARNED_NODES = profile.learned_nodes(counts)
-  end
-
-  local nodes = curve.buildNodes(xs, curve.FIXED_BRIGHTNESS_Y, { map_x = map_brightness_x })
-  local built = curve.compile(nodes)
-  if built == nil then
-    -- Nothing usable: behave exactly as if the toggle were off, so an unusable
-    -- profile can never leave the panel unmanaged.
-    ACTIVE_BR = CURVE_BR
-    CURVE_SOURCE = "sliders (profile not usable yet)"
-    return
-  end
-  ACTIVE_BR = built
-  if LEARNING then
-    CURVE_SOURCE = string.format("sliders+learned (%d/%d nodes)", LEARNED_NODES, #THR_BR)
-  else
-    CURVE_SOURCE = "sliders"
-  end
-end
-
---- The map path: the owner's rows, parsed exactly as written (Phase 5 and
---- earlier). Used only when the map was edited away from the shipped default.
-local function load_curve(key, fallback, map_x, anchor)
-  local items = setting_nodes(key, fallback)
-  local nodes, problems = curve.parse_nodes(items, { map_x = map_x })
-  for _, problem in ipairs(problems) do
-    log("curve " .. key .. ": " .. problem)
-  end
-  if #nodes == 0 then
-    log("curve " .. key .. ": no usable nodes, falling back to the shipped default")
-    nodes = curve.parse_nodes(fallback, { map_x = map_x })
-  end
-  if not curve.is_monotone(nodes) then
-    -- Honoured, never rewritten: silently monotone-ising the owner's numbers would
-    -- be the worst possible behaviour for a curve they are tuning. It stays safe
-    -- because PCHIP cannot overshoot past a node value.
-    log("curve " .. key .. ": values are not monotone; using them as written")
-  end
-  local compiled = anchor and curve.with_anchors(nodes) or nodes
-  return curve.compile(compiled), #nodes
-end
-
---- The slider path (Phase 6): outputs are the fixed constants in curve.luau and
---- the sliders choose each node's threshold. Build problems (crossing sliders,
---- unusable values) are logged HERE, never in rebuild_active, which runs on
---- every observation.
-local function load_slider_curve(key, thresholds, fixed_ys, map_x, anchor)
-  local nodes, problems = curve.buildNodes(thresholds, fixed_ys, { map_x = map_x })
-  for _, problem in ipairs(problems) do
-    log("curve " .. key .. ": " .. problem)
-  end
-  local compiled = anchor and curve.with_anchors(nodes) or nodes
-  return curve.compile(compiled), #nodes
-end
-
 local function reload()
-  ENABLED = setting_bool("enabled", true)
-  COLORTEMP = setting_bool("colortemp", false)
-  LEARNING = setting_bool("learning_profile", false)
-  -- CONNECTOR comes from the start probe, never from a guess; changing the
-  -- setting takes effect on the next plugin restart (hardware is probed once).
+  CFG.enabled = setting_bool("enabled", true)
+  CFG.colortemp_enabled = setting_bool("colortemp", false)
+  -- The connector comes from the start probe (HW.devices.connector), never
+  -- from a guess; changing the setting takes effect on the next plugin restart
+  -- (hardware is probed once).
   CFG.min_percent = setting_number("min_percent", 15)
   CFG.max_percent = setting_number("max_percent", 100)
-  PROF_CFG_BR = fit_bounds("brightness")
 
-  THR_BR = setting_thresholds("thr_brightness", curve.DEFAULT_BRIGHTNESS_X)
-  THR_TEMP = setting_thresholds("thr_temperature", curve.DEFAULT_TEMPERATURE_X)
-
-  -- Precedence (Phase 6): the sliders run the curve; the advanced map editors
-  -- win only when the owner actually edited them away from the shipped default.
-  BR_CUSTOM_MAP = curve.map_is_custom(
-    setting_nodes("curve_brightness", curve.DEFAULT_BRIGHTNESS), curve.DEFAULT_BRIGHTNESS)
-  TEMP_CUSTOM_MAP = curve.map_is_custom(
-    setting_nodes("curve_temperature", curve.DEFAULT_TEMPERATURE), curve.DEFAULT_TEMPERATURE)
-
-  if BR_CUSTOM_MAP then
-    CURVE_BR, COUNT_BR = load_curve("curve_brightness", curve.DEFAULT_BRIGHTNESS, map_brightness_x)
-  else
-    CURVE_BR, COUNT_BR =
-      load_slider_curve("curve_brightness", THR_BR, curve.FIXED_BRIGHTNESS_Y, map_brightness_x)
+  -- Which curve is live, and why: curve_source absorbs the curve-key readers,
+  -- the map-vs-sliders precedence, the learned nudges and every curve log line.
+  -- The lines come back verbatim (and in the old order) so this file only
+  -- decides WHEN to write them -- the per-observation rebuild stays silent.
+  SESSION.curve_settings = snapshot_settings()
+  SESSION.cs = curve_source.resolve(SESSION.curve_settings, { profile = SESSION.profile })
+  for _, line in ipairs(SESSION.cs.log) do
+    log(line)
   end
-  if TEMP_CUSTOM_MAP then
-    CURVE_TEMP, COUNT_TEMP =
-      load_curve("curve_temperature", curve.DEFAULT_TEMPERATURE, nil, true)
-  else
-    CURVE_TEMP, COUNT_TEMP =
-      load_slider_curve("curve_temperature", THR_TEMP, curve.FIXED_TEMPERATURE_Y, nil, true)
-  end
-
-  if BR_CUSTOM_MAP and LEARNING then
-    log("learning suspended: curve_brightness is a custom map (the map wins outright)")
-  end
-
-  if CURVE_TEMP then
-    log(string.format("temperature curve: %d visible + %d hidden anchor nodes",
-      COUNT_TEMP, CURVE_TEMP.n - COUNT_TEMP))
-  end
-
-  rebuild_active()
-
-  log(string.format(
-    "config: brightness=%d nodes via %s, temperature=%d nodes via %s, learning=%s source=%s",
-    COUNT_BR, BR_CUSTOM_MAP and "map" or "sliders",
-    COUNT_TEMP, TEMP_CUSTOM_MAP and "map" or "sliders",
-    tostring(LEARNING), CURVE_SOURCE))
 end
 
--- Backlight paths come from the start probe (hardware.discover), never guessed.
-local BL_CUR, BL_MAX
-
--- ── state ────────────────────────────────────────────────────────────────────
-local S = {
-  log = nil,            -- stabilised log10 reading
-  last_written = nil,   -- percent we last commanded
-  override = nil,       -- {raw=, percent=, at=}
-  idle = false,         -- set by the idle handshake, not inferred
-  locked = false,       -- refreshed by a slow poll
-  last_ms = nil,
-  last_reason = nil,
-  applied_k = nil,      -- night-light temperature we last wrote
-  last_temp_s = nil,
-}
-
+-- ── IO helpers ───────────────────────────────────────────────────────────────
 local function trim(s)
   if s == nil then return nil end
   return (tostring(s):gsub("%s+$", ""))
@@ -347,22 +200,17 @@ local function read_num(path)
   return tonumber(trim(noctalia.readFile(path)))
 end
 
-local function read_str(path)
-  return trim(noctalia.readFile(path))
-end
-
 -- ── the slow lock poll ───────────────────────────────────────────────────────
 -- `noctalia msg status` is the only way to learn the lock state, and shelling out
--- every second would be wasteful, so it is sampled on its own cadence. RunAsync
--- with an argv table needs plugin_api 24, which is why the manifest declares it.
-local LOCK_POLL_TICKS = 10
-local function poll_locked(tick)
-  if tick % LOCK_POLL_TICKS ~= 0 then return end
+-- every second would be wasteful, so decide() emits `poll_lock` on its own slow
+-- cadence and this runs it. RunAsync with an argv table needs plugin_api 24,
+-- which is why the manifest declares it.
+local function poll_locked()
   noctalia.runAsync({ "noctalia", "msg", "status" }, function(result)
     if result == nil or result.exitCode ~= 0 then return end
     local ok, decoded = pcall(noctalia.json.decode, result.stdout or "")
     if ok and type(decoded) == "table" and decoded.locked ~= nil then
-      S.locked = decoded.locked and true or false
+      SESSION.locked = decoded.locked and true or false
     end
   end, 4000)
 end
@@ -370,31 +218,19 @@ end
 -- ── applying a change ────────────────────────────────────────────────────────
 local function write_percent(pct)
   local frac = pct / 100.0
-  noctalia.runAsync({ "noctalia", "msg", "brightness-set", CONNECTOR,
+  noctalia.runAsync({ "noctalia", "msg", "brightness-set", HW.devices.connector,
                       string.format("%.4f", frac) }, nil, 4000)
-  -- Record what we asked for, not what we read back: the readback path has its own
-  -- transfer curve (actual ~= requested), but `brightness` is the value both
-  -- brightnessctl and Noctalia agree on, and it is what we compare against.
-  S.last_written = pct
+  -- decide() records what we asked for in SESSION.last_written, not what we read
+  -- back: the readback path has its own transfer curve (actual ~= requested), but
+  -- `brightness` is the value both brightnessctl and Noctalia agree on, and it is
+  -- what we compare against.
 end
 
 -- ── the learned profile ──────────────────────────────────────────────────────
---- An observation is simply an override the owner made: where the ambient was, and
---- what they set the panel to. Recorded in the curve's own domain, so the fit can
---- lay it straight onto the authored x positions.
-local function record_observation(raw, percent, now_s)
-  profile.add(PROF, {
-    x = map_brightness_x(raw),
-    y = percent,
-    raw = raw,
-    at = now_s,
-  }, CFG)
-  DIRTY = true
-  save_profile(now_s, false)
-  -- The learned curve only changes when an observation lands, so this is the only
-  -- place it needs rebuilding. A custom map suspends learning entirely.
-  if LEARNING and not BR_CUSTOM_MAP then rebuild_active() end
-end
+-- Recording an observation (profile.add + the curve rebuild) is part of the
+-- timeline decision and lives in adaptation.decide(); what is left here is
+-- persistence. A `record` action means the observation is already folded into
+-- SESSION.profile / SESSION.cs and wants saving.
 
 -- ── colour temperature ───────────────────────────────────────────────────────
 -- Noctalia owns the gamma LUT, so rather than opening a second writer on
@@ -403,36 +239,79 @@ end
 -- sees a half-written file, and the content is spliced as text so the user's
 -- comments and key order survive.
 local function apply_temperature(kelvin, now_s)
-  if SETTINGS_PATH == nil then
+  local settings_path = HW.paths.settings_path
+  if settings_path == nil then
     -- Degraded at the probe (HOME unset): skip, and never guess a path.
     warn_once("settings-path", "colortemp skipped: no settings path (HOME unset)")
     return
   end
-  local text = noctalia.readFile(SETTINGS_PATH)
+  local text = noctalia.readFile(settings_path)
   if text == nil then
-    log("colortemp: cannot read " .. SETTINGS_PATH)
+    log("colortemp: cannot read " .. settings_path)
     return
   end
   local new_text, changed = colortemp.splice(text, kelvin)
   if not changed then
     -- Already correct; record it so we stop reconsidering until the ambient moves.
-    S.applied_k = kelvin
-    S.last_temp_s = now_s
+    SESSION.applied_k = kelvin
+    SESSION.last_temp_s = now_s
     return
   end
-  local tmp = SETTINGS_PATH .. ".als-brightness.tmp"
+  local tmp = settings_path .. ".als-brightness.tmp"
   if not noctalia.writeFile(tmp, new_text) then
     log("colortemp: cannot write " .. tmp)
     return
   end
-  if not noctalia.renameFile(tmp, SETTINGS_PATH) then
-    log("colortemp: cannot replace " .. SETTINGS_PATH)
+  if not noctalia.renameFile(tmp, settings_path) then
+    log("colortemp: cannot replace " .. settings_path)
     return
   end
   noctalia.runAsync({ "noctalia", "msg", "config-reload" }, nil, 8000)
-  S.applied_k = kelvin
-  S.last_temp_s = now_s
+  SESSION.applied_k = kelvin
+  SESSION.last_temp_s = now_s
   log(string.format("colortemp: applied %dK", math.floor(kelvin)))
+end
+
+-- ── the executor ─────────────────────────────────────────────────────────────
+-- Walks decide()'s action list in order. Everything here is IO or IO feedback;
+-- every choice about WHAT to do was already made in adaptation.decide().
+local function perform(actions)
+  for _, action in ipairs(actions) do
+    local kind = action.kind
+    if kind == "log" then
+      log(action.line)
+    elseif kind == "warn_once" then
+      warn_once(action.key, action.line)
+    elseif kind == "write" then
+      write_percent(action.percent)
+    elseif kind == "record" then
+      -- The observation is already folded into SESSION.profile / SESSION.cs
+      -- (decide() did the pure part); what is left is the persistence half of
+      -- the old record_observation: mark dirty, throttled save.
+      DIRTY = true
+      save_profile(action.now_s, false)
+    elseif kind == "save_profile" then
+      save_profile(action.now_s, action.force)
+    elseif kind == "poll_lock" then
+      poll_locked()
+    elseif kind == "apply_temperature" then
+      apply_temperature(action.kelvin, action.now_s)
+    end
+  end
+end
+
+-- The snapshot decide() reads: sysfs plus the hardware guards. All IO lives
+-- here; a read that fails yields nil and decide() decides what that means (hold,
+-- warn once) -- the path strings the warn lines quote ride along in opts.paths.
+local function read_observed()
+  local observed = {}
+  observed.raw = read_num(HW.paths.als_raw)
+  observed.percent = policy.percent_of(read_num(HW.paths.bl_cur), read_num(HW.paths.bl_max))
+  observed.guards = HW.guard_state(HW_ENV)
+  if CFG.colortemp_enabled then
+    observed.ambient_k = read_num(HW.paths.als_ct)
+  end
+  return observed
 end
 
 -- ── the tick ─────────────────────────────────────────────────────────────────
@@ -442,128 +321,10 @@ noctalia.setUpdateInterval(1000)
 function update()
   if not HW_OK then return end
   ticks = ticks + 1
-  local now_ms = noctalia.nowMs()
-  local dt = S.last_ms and (now_ms - S.last_ms) / 1000.0 or 1.0
-  S.last_ms = now_ms
-  if dt <= 0 then dt = 1.0 end
-  -- The policy module works in SECONDS (see policy.override_expired); the host
-  -- clock is in milliseconds. Convert once, here, and never pass raw ms down.
-  local now_s = now_ms / 1000.0
-
-  if not ENABLED then
-    if S.last_reason ~= "disabled" then
-      S.last_reason = "disabled"
-      log("suspended: disabled by setting")
-    end
-    return
-  end
-
-  local raw = read_num(ALS_RAW)
-  if raw == nil then
-    -- Probed once at start; a later failure skips the write rather than feeding
-    -- zeros into the curve. Restart the plugin to re-probe the hardware.
-    warn_once("als-read",
-      "ambient read failed at " .. tostring(ALS_RAW) .. "; not writing")
-    return
-  end
-  local observed = policy.percent_of(read_num(BL_CUR), read_num(BL_MAX))
-  if observed == nil then
-    warn_once("bl-read",
-      "backlight read failed at " .. tostring(BL_CUR) .. "; not writing")
-    return
-  end
-
-  if ticks % 60 == 0 then
-    log(string.format("heartbeat raw=%d stab=%s last=%s observed=%s idle=%s locked=%s curve=%s",
-      raw,
-      S.log and string.format("%.3f", S.log) or "nil",
-      S.last_written and string.format("%.1f", S.last_written) or "nil",
-      observed and string.format("%.1f", observed) or "nil",
-      tostring(S.idle), tostring(S.locked), CURVE_SOURCE))
-  end
-
-  -- A change we did not command, while awake, is the user taking over.
-  -- Crucially this is skipped while idle: the 30% idle dim is authored policy,
-  -- not a preference, and must never be learned as one.
-  --
-  -- Only the FIRST detection records an override. Re-recording on every tick would
-  -- move the anchor and reset the timeout each second, so the window could never
-  -- expire.
-  if not S.idle and S.last_written ~= nil and S.override == nil
-     and policy.is_manual_change(S.last_written, observed, CFG) then
-    S.override = { raw = raw, percent = observed, at = now_s }
-    log(string.format("user override recorded: observed=%.1f%% raw=%d", observed, raw))
-    record_observation(raw, observed, now_s)
-  end
-
-  poll_locked(ticks)
-  save_profile(now_s, false)
-
-  local override_active = S.override ~= nil
-    and not policy.override_expired(S.override, raw, now_s, CFG)
-  if S.override ~= nil and not override_active then
-    S.override = nil
-    -- Re-baseline from wherever the user left the panel. Without this the next
-    -- tick would compare against a stale last_written and immediately detect a
-    -- brand-new override, so the adapter would never resume.
-    S.last_written = observed
-    log(string.format("override expired at raw=%d, re-baselined at %s",
-      raw, observed and string.format("%.1f%%", observed) or "nil"))
-  end
-
-  local ok, reason = policy.guard({
-    -- An unavailable guard PASSES (reported as degraded at start); it never
-    -- blocks adaptation, or a machine without a DPMS node or lid switch would
-    -- never adapt at all.
-    dpms = DPMS == nil and "On" or read_str(DPMS),
-    lid_closed = LID ~= nil and (read_str(LID) or ""):find("closed") ~= nil,
-    idle_engaged = S.idle,
-    locked = S.locked,
-    override_active = override_active,
-  })
-
-  if not ok then
-    if S.last_reason ~= reason then
-      S.last_reason = reason
-      log("suspended: " .. reason)
-    end
-    return
-  end
-
-  if S.last_reason ~= "ok" then
-    S.last_reason = "ok"
-    log("resumed: adapting")
-  end
-
-  -- Stabilise first, then map, then rate limit: each stage is a separate pure
-  -- function so the ordering is explicit and tested.
-  S.log = policy.stabilize(S.log, raw, dt, CFG)
-  local target = policy.clamp(curve.eval(ACTIVE_BR, S.log) or CFG.min_percent, CFG)
-  local commanded = policy.slew(S.last_written, target, dt, CFG)
-
-  if policy.should_write(S.last_written, commanded, CFG) then
-    log(string.format("write: raw=%d target=%.1f commanded=%.1f (was %s) via %s",
-      raw, target, commanded,
-      S.last_written and string.format("%.1f", S.last_written) or "nil",
-      CURVE_SOURCE))
-    write_percent(commanded)
-  end
-
-  -- Colour temperature rides on the same guards: it only acts when brightness
-  -- would, so a dimmed, locked or overridden session is left alone too. The
-  -- learned profile deliberately does not touch it -- there is no user signal to
-  -- learn a temperature preference from.
-  if COLORTEMP then
-    local ambient_k = read_num(ALS_CT)
-    if ambient_k ~= nil and ambient_k > 0 then
-      local mapped = curve.eval(CURVE_TEMP, ambient_k)
-      local target_k = colortemp.clamp_k(mapped, colortemp.MAP_DEFAULTS)
-      if target_k ~= nil
-         and colortemp.should_apply(S.applied_k, target_k, S.last_temp_s, now_s) then
-        apply_temperature(target_k, now_s)
-      end
-    end
-  end
+  -- The clock is INJECTED as a reading (noctalia.nowMs, milliseconds); decide()
+  -- converts to seconds exactly once. Nothing below this line does time math.
+  perform(adaptation.decide(SESSION, ticks, read_observed(), {}, CFG,
+    { now_ms = noctalia.nowMs(), paths = HW.paths }))
 end
 
 -- ── hooks ────────────────────────────────────────────────────────────────────
@@ -577,45 +338,11 @@ function onIpc(event, _payload)
     warn_once("ipc-while-down", "ipc event '" .. tostring(event) .. "' ignored: hardware unavailable")
     return
   end
-  if event == "idle-engaged" then
-    S.idle = true
-    log("idle engaged")
-  elseif event == "idle-released" then
-    S.idle = false
-    -- Re-baseline from whatever brightnessctl -r just restored, so the restore is
-    -- never mistaken for a user override.
-    S.override = nil
-    S.last_written = policy.percent_of(read_num(BL_CUR), read_num(BL_MAX))
-    S.log = nil
-    log(string.format("idle released, re-baselined at %s",
-      S.last_written and string.format("%.1f%%", S.last_written) or "nil"))
-  elseif event == "user-adjusted" then
-    if S.idle then
-      -- The 30% idle dim is authored policy, not a preference, and while it is in
-      -- force the panel is not showing what the owner asked for. Recording here
-      -- would file the dim as their preferred brightness -- exactly the mistake
-      -- the idle handshake exists to prevent. This was caught on hardware: with
-      -- the session idle, an injected user-adjusted event wrote 30% into the
-      -- profile as a learned value.
-      --
-      -- Swallowing the event is safe: idle-release re-baselines from whatever
-      -- brightnessctl -r restored, and the tick picks up any genuine change
-      -- afterwards.
-      log("user-adjusted ignored while idle (the dim is not a preference)")
-      return
-    end
-    local raw = read_num(ALS_RAW) or 0
-    local percent = policy.percent_of(read_num(BL_CUR), read_num(BL_MAX)) or 0
-    local now_s = noctalia.nowMs() / 1000.0
-    S.override = { raw = raw, percent = percent, at = now_s }
-    log("user override via keybinding")
-    -- The definitive signal is also the best observation: the owner has told us
-    -- exactly where the ambient was and what they wanted.
-    record_observation(raw, percent, now_s)
-    save_profile(now_s, true)
-  else
-    log("unknown ipc event: " .. tostring(event))
-  end
+  -- The event is decided at its own instant (tick = nil): the handshake and the
+  -- keybinding signal land in the log when they happen, never a tick later. The
+  -- event vocabulary and every state transition live in adaptation.decide().
+  perform(adaptation.decide(SESSION, nil, read_observed(), { event }, CFG,
+    { now_ms = noctalia.nowMs(), paths = HW.paths }))
 end
 
 function onConfigChanged()
@@ -624,7 +351,7 @@ function onConfigChanged()
     log("config changed; hardware still unavailable -- toggle the plugin to re-probe")
     return
   end
-  log("config changed; curves rebuilt, now using " .. CURVE_SOURCE)
+  log("config changed; curves rebuilt, now using " .. SESSION.cs.brightness.source)
 end
 
 -- ── start ────────────────────────────────────────────────────────────────────
@@ -632,9 +359,9 @@ end
 -- availability is decided exactly once, here. Nothing below runs when a required
 -- device is missing -- the service idles, says why, and never writes to a panel
 -- it cannot see.
-HW = hardware.discover(
-  { listDir = noctalia.listDir, readFile = noctalia.readFile,
-    outputs = noctalia.outputs, getenv = noctalia.getenv },
+HW_ENV = { listDir = noctalia.listDir, readFile = noctalia.readFile,
+           outputs = noctalia.outputs, getenv = noctalia.getenv }
+HW = hardware.discover(HW_ENV,
   { backlight = setting_string("backlight", ""),
     connector = setting_string("connector", "") })
 
@@ -653,12 +380,6 @@ if #HW.required_missing > 0 then
 end
 HW_OK = true
 
-ALS_RAW, ALS_CT = HW.paths.als_raw, HW.paths.als_ct
-DPMS, LID = HW.paths.dpms, HW.paths.lid
-BL_CUR, BL_MAX = HW.paths.bl_cur, HW.paths.bl_max
-SETTINGS_PATH = HW.paths.settings_path
-CONNECTOR = HW.devices.connector
-
 load_profile()
 reload()
 
@@ -668,6 +389,6 @@ log(string.format("hardware: als=%s backlight=%s connector=%s%s%s%s",
   HW.devices.colortemp and " colortemp=" .. HW.devices.colortemp or "",
   HW.paths.dpms ~= nil and " dpms=" .. HW.paths.dpms or "",
   HW.devices.lid ~= nil and " lid=" .. HW.devices.lid or ""))
-log("service starting: connector=" .. tostring(CONNECTOR)
-  .. " brightness=" .. tostring(BL_CUR)
-  .. " observations=" .. tostring(#PROF.observations))
+log("service starting: connector=" .. tostring(HW.devices.connector)
+  .. " brightness=" .. tostring(HW.paths.bl_cur)
+  .. " observations=" .. tostring(#SESSION.profile.observations))

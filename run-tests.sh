@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-cleanup() { rm -f "${tmp_manifest:-}" "${tmp_code:-}"; }
+cleanup() { rm -f "${tmp_expected:-}" "${tmp_actual:-}"; }
 trap cleanup EXIT
 
 echo "--- syntax ---"
@@ -22,8 +22,9 @@ echo "--- lint ---"
 # are called by the Noctalia host, so luau-analyze reports them as unused
 # functions. The pure modules have no such excuse.
 luau-analyze als-brightness/policy.luau als-brightness/colortemp.luau \
-  als-brightness/curve.luau als-brightness/profile.luau \
-  als-brightness/hardware.luau
+  als-brightness/curve.luau als-brightness/curve_source.luau \
+  als-brightness/settings_spec.luau als-brightness/profile.luau \
+  als-brightness/hardware.luau als-brightness/adaptation.luau
 
 echo
 echo "--- manifest ---"
@@ -38,39 +39,121 @@ else
 fi
 
 echo
-echo "--- curve defaults agree ---"
-# The manifest default (what the settings page shows) and the code default (what
-# the service falls back to) must be the same table. Nothing else checks this, and a
-# silent divergence would mean the number you can see is not the number in use.
+echo "--- settings surface agrees ---"
+# The manifest literals (what the settings page shows), the en.json row text
+# (what the row promises the node outputs) and the code constants (what the
+# service runs on) are three copies of the same facts. A silent divergence means
+# the number you can see is not the number in use, or that a row promises an
+# output its node no longer produces -- and until this check, prose values
+# ("-> 5940K") were never checked at all: only the 40 numeric rows were.
 #
-# The keys are compared too, not just the values: the editor sorts rows as text, so
-# a key that stops being zero-padded reorders the curve on screen without changing
-# a single number.
-tmp_manifest="$(mktemp)"
-tmp_code="$(mktemp)"
-python3 - als-brightness/plugin.toml >"$tmp_manifest" <<'PY'
-import sys, tomllib
-with open(sys.argv[1], "rb") as fh:
+# One authority per value, everything else checked against it:
+#   node positions / outputs / slider windows  curve.luau (via settings_spec)
+#   percent clamp defaults                     policy.luau (via settings_spec)
+#   row text templates + number spelling       settings_spec.luau
+# settings_spec.luau emits the expected rows; python3 flattens plugin.toml and
+# translations/en.json into the same shapes and the streams are diffed line for
+# line. Keys are compared too, not just values: the editor sorts rows by key as
+# text, so a key that stops being zero-padded reorders the curve on screen
+# without changing a single number.
+tmp_expected="$(mktemp)"
+tmp_actual="$(mktemp)"
+luau tests/print-defaults.luau >"$tmp_expected"
+python3 - als-brightness/plugin.toml als-brightness/translations/en.json \
+  als-brightness/service.luau "$tmp_actual" <<'PY'
+import json, re, sys, tomllib
+
+manifest_path, en_path, service_path, out_path = sys.argv[1:5]
+
+with open(manifest_path, "rb") as fh:
     manifest = tomllib.load(fh)
-sliders = []
-for setting in manifest["setting"]:
-    if setting.get("type") == "string_map":
-        for key, value in sorted(setting["default"].items()):
-            print(f"{setting['key']}\t{key}\t{value}")
-    elif setting.get("type") == "int" and setting["key"].startswith("thr_"):
-        sliders.append(setting)
-# The 20 threshold sliders drift-check the same way: manifest literals (default,
-# min, max, step) against curve.DEFAULT_*_X and curve.threshold_window.
-for setting in sorted(sliders, key=lambda s: s["key"]):
-    print("{}\t{}\t{}\t{}\t{}".format(
-        setting["key"], setting["default"], setting["min"], setting["max"], setting["step"]))
+with open(en_path, encoding="utf-8") as fh:
+    en = json.load(fh)["settings"]
+with open(service_path, encoding="utf-8") as fh:
+    service = fh.read()
+
+settings = manifest["setting"]
+by_key = {s["key"]: s for s in settings}
+node_key = re.compile(r"^thr_(?:brightness|temperature)_\d\d$")
+problems = []
+
+
+def num(value):
+    return format(value, "g") if isinstance(value, float) else str(value)
+
+
+# The actual side: the same four row shapes settings_spec.surface_rows() emits.
+rows = []
+for s in settings:
+    key = s["key"]
+    if s.get("type") == "string_map":
+        for map_key, value in sorted(s["default"].items()):
+            rows.append("map\t{}\t{}\t{}".format(key, map_key, value))
+    elif s.get("type") == "int" and key.startswith("thr_"):
+        rows.append("thr\t{}\t{}\t{}\t{}\t{}".format(
+            key, num(s["default"]), num(s["min"]), num(s["max"]), num(s["step"])))
+    elif key in ("min_percent", "max_percent"):
+        rows.append("pct\t{}\t{}".format(key, s["default"]))
+for key in sorted(en):
+    if node_key.match(key):
+        rows.append("text\t{}\t{}\t{}".format(key, en[key]["label"], en[key]["description"]))
+
+# Wiring: every [[setting]] resolves through its label_key/description_key into
+# translations/en.json and back, exact spelling, no orphans either way.
+for s in settings:
+    key = s["key"]
+    if s.get("label_key") != "settings.{}.label".format(key):
+        problems.append("FAIL  {} label_key is {!r}, expected settings.{}.label".format(
+            key, s.get("label_key"), key))
+    if s.get("description_key") != "settings.{}.description".format(key):
+        problems.append("FAIL  {} description_key is {!r}, expected settings.{}.description".format(
+            key, s.get("description_key"), key))
+    if key not in en:
+        problems.append("FAIL  {} has no translations/en.json entry".format(key))
+for key in sorted(en):
+    if key not in by_key:
+        problems.append("FAIL  translations/en.json entry {} matches no [[setting]]".format(key))
+
+# Prose values: static row text must carry no numeric literal at all. Host
+# labels are static strings, so a number in prose is unchecked by definition;
+# if a row needs one, it must derive from a constant through settings_spec
+# (the node rows do) rather than being typed into en.json.
+non_node = 0
+for key in sorted(en):
+    if node_key.match(key):
+        continue
+    non_node += 1
+    for field in ("label", "description"):
+        value = en[key][field]
+        if re.search(r"\d", value):
+            problems.append("FAIL  {}.{} carries a numeric literal in static prose: {!r}".format(
+                key, field, value))
+
+# The percent clamp defaults also live as literal fallbacks in service.luau
+# (setting_number("min_percent", 15)). A literal must equal the shipped default;
+# absence is fine -- a fallback expressed through policy.DEFAULTS has one owner
+# already.
+for key in ("min_percent", "max_percent"):
+    m = re.search(r'setting_number\("' + key + r'",\s*([0-9.]+)\)', service)
+    if m and m.group(1) != str(by_key[key]["default"]):
+        problems.append("FAIL  service.luau falls back to {} for {} but plugin.toml defaults to {}".format(
+            m.group(1), key, by_key[key]["default"]))
+
+if problems:
+    print("\n".join(problems))
+    sys.exit(1)
+print("ok    {} settings x 2 keys wired to translations/en.json, no orphans".format(len(settings)))
+print("ok    the {} non-node rows carry no numeric literal in static prose".format(non_node))
+print("ok    min/max_percent fallback literals match the manifest defaults")
+
+with open(out_path, "w", encoding="utf-8") as fh:
+    fh.write("".join(line + "\n" for line in sorted(rows)))
 PY
-luau tests/print-defaults.luau >"$tmp_code"
-if diff -u "$tmp_manifest" "$tmp_code" >/dev/null; then
-  echo "ok    plugin.toml and curve.luau ship the same $(wc -l <"$tmp_manifest" | tr -d ' ') nodes"
+if diff -u "$tmp_expected" "$tmp_actual" >/dev/null; then
+  echo "ok    plugin.toml, en.json and the code constants ship the same $(wc -l <"$tmp_expected" | tr -d ' ') rows"
 else
-  echo "FAIL  the manifest and code curve defaults have drifted:"
-  diff -u "$tmp_manifest" "$tmp_code" | sed 's/^/      /' || true
+  echo "FAIL  the shipped settings surface has drifted from the code constants:"
+  diff -u "$tmp_expected" "$tmp_actual" | sed 's/^/      /' || true
   exit 1
 fi
 
@@ -91,7 +174,11 @@ if row["version"] != manifest["version"]:
     print("FAIL  catalog.toml says {} but plugin.toml says {}".format(
         row["version"], manifest["version"]))
     sys.exit(1)
-print("ok    catalog.toml and plugin.toml both say {}".format(manifest["version"]))
+if row["description"] != manifest["description"]:
+    print("FAIL  catalog.toml and plugin.toml disagree on the description")
+    sys.exit(1)
+print("ok    catalog.toml and plugin.toml both say {} and carry the same description".format(
+    manifest["version"]))
 PY
 
 echo
@@ -99,5 +186,8 @@ echo "--- tests ---"
 luau tests/policy.test.luau
 luau tests/colortemp.test.luau
 luau tests/curve.test.luau
+luau tests/curve_source.test.luau
+luau tests/settings_spec.test.luau
+luau tests/adaptation.test.luau
 luau tests/profile.test.luau
 luau tests/hardware.test.luau
