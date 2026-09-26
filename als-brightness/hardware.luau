@@ -112,6 +112,8 @@ end
 ---   devices         human-readable names, for the startup log
 ---   required_missing  reasons the service must not start (list of strings)
 ---   degraded          reasons a feature/guard is unavailable (list of strings)
+---   guard_state(env)  adapter: the runtime guards this probe discovered, in
+---                     policy.guard's vocabulary (see below)
 ---
 --- opts.backlight  raw `backlight` setting ("" = auto-detect)
 --- opts.connector  raw `connector` setting ("" = auto-detect)
@@ -221,6 +223,32 @@ function M.discover(env, opts)
     paths.settings_path = home .. SETTINGS_SUFFIX
   else
     deg[#deg + 1] = "HOME is unset; the colour-temperature settings splice is unavailable"
+  end
+
+  -- Runtime guard inputs, in policy.guard's vocabulary ({dpms=, lid_closed=}).
+  -- The locked decision "an UNAVAILABLE guard PASSES" lives HERE, next to the
+  -- probe that decided the device is missing: a machine without a DPMS node
+  -- reads as dpms="On", a machine without a lid switch reads as open, so a
+  -- guard for hardware this machine does not have can never block adaptation.
+  -- The service never re-derives that from nil paths.
+  --
+  -- A device that WAS probed but fails to read at runtime is not unavailability
+  -- and keeps its raw result, matching the service's historical behaviour:
+  -- dpms=nil blocks (policy.guard reports "dpms=nil"), a failed lid read stays
+  -- open. Availability was decided once, at the probe.
+  --
+  -- env is injected in the same shape discover() takes; only readFile is
+  -- needed. Fields this probe does not own (idle_engaged, locked,
+  -- override_active) are service state and stay with the caller.
+  report.guard_state = function(env)
+    local state = { dpms = "On", lid_closed = false }
+    if paths.dpms ~= nil then
+      state.dpms = trim(env.readFile(paths.dpms))
+    end
+    if paths.lid ~= nil then
+      state.lid_closed = (trim(env.readFile(paths.lid)) or ""):find("closed") ~= nil
+    end
+    return state
   end
 
   return report

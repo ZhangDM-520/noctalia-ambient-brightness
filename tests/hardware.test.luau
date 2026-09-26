@@ -237,6 +237,106 @@ do
   check("no colortemp sensor: path nil", r.paths.als_ct, nil)
 end
 
+-- ── guard_state: the report owns what a missing guard means ─────────────────
+-- The service asks the report for the hardware guard inputs instead of
+-- re-deriving them from nil paths. Like the sections above, each machine is the
+-- healthy one with a piece taken away or changed.
+do
+  local m = healthy()
+  local r = hardware.discover(m, {})
+  check_true("guard_state: adapter carried by the report",
+    type(r.guard_state) == "function")
+  local g = r.guard_state(m)
+  check("guard_state healthy: dpms passes (On from the node)", g.dpms, "On")
+  check("guard_state healthy: lid open", g.lid_closed, false)
+  local n = 0
+  for _ in pairs(g) do n = n + 1 end
+  check("guard_state: exactly the hardware-owned fields", n, 2)
+end
+
+do
+  -- A real reading beats the fallback: the node decides when it is present
+  -- ("Off\n" arrives trimmed, as the service's read_str always did).
+  local m = healthy({ files = { [DRM .. "card1-eDP-1/dpms"] = "Off\n" } })
+  local g = hardware.discover(m, {}).guard_state(m)
+  check("guard_state dpms Off: the node decides", g.dpms, "Off")
+end
+
+do
+  -- THE locked decision: an unavailable guard PASSES. A missing DPMS node
+  -- reads as "On", so policy.guard cannot block on hardware this machine
+  -- does not have.
+  local m = healthy({ files = { [DRM .. "card1-eDP-1/dpms"] = false } })
+  local g = hardware.discover(m, {}).guard_state(m)
+  check("no dpms: guard_state passes", g.dpms, "On")
+  check("no dpms: lid guard still live", g.lid_closed, false)
+end
+
+do
+  -- The same decision on the lid: a missing switch reads as open, while the
+  -- DPMS guard next to it keeps the node's real (blocking) value.
+  local m = healthy({ dirs = { [LID] = false }, files = {
+    [LID .. "LID/state"] = false,
+    [DRM .. "card1-eDP-1/dpms"] = "Off\n" } })
+  local g = hardware.discover(m, {}).guard_state(m)
+  check("no lid: guard_state passes", g.lid_closed, false)
+  check("no lid: dpms guard still live", g.dpms, "Off")
+end
+
+do
+  local m = healthy({ files = { [LID .. "LID/state"] = "closed\n" } })
+  local g = hardware.discover(m, {}).guard_state(m)
+  check("lid closed: guard_state reports it", g.lid_closed, true)
+end
+
+do
+  -- A node that was probed but fails to read at runtime is NOT unavailability:
+  -- the passing fallbacks are decided at the probe and stay put. dpms keeps
+  -- its raw nil (policy.guard blocks with "dpms=nil"), the lid stays open --
+  -- byte for byte what the service did before the seam moved.
+  local files = {
+    [IIO .. "iio:device2/in_illuminance_raw"] = "9",
+    [IIO .. "iio:device2/name"] = "als\n",
+    [BL .. "amdgpu_bl1/brightness"] = "100",
+    [BL .. "amdgpu_bl1/max_brightness"] = "255",
+    [DRM .. "card1-eDP-1/dpms"] = "On\n",
+    [LID .. "LID/state"] = "open\n",
+  }
+  local m = machine({ files = files, dirs = {
+    [IIO] = { "iio:device2" }, [BL] = { "amdgpu_bl1" },
+    [DRM] = { "card0", "card1-eDP-1" }, [LID] = { "LID" },
+  }, outputs = { { name = "eDP-1", focused = true } }, home = "/home/alice" })
+  local r = hardware.discover(m, {})
+  files[DRM .. "card1-eDP-1/dpms"] = nil
+  files[LID .. "LID/state"] = nil
+  local g = r.guard_state(m)
+  check("probe-time truth: read failure is not the missing-device fallback", g.dpms, nil)
+  check("probe-time truth: lid read failure stays open", g.lid_closed, false)
+end
+
+do
+  -- Auto-picked connector: guard_state reads the node behind the connector
+  -- the probe resolved (HDMI-A-1 here), never a hardcoded one.
+  local m = healthy({
+    dirs = { [DRM] = { "card0", "card1-eDP-1", "card1-HDMI-A-1" } },
+    files = { [DRM .. "card1-HDMI-A-1/dpms"] = "Off\n" },
+    outputs = { { name = "HDMI-A-1" } },
+  })
+  local r = hardware.discover(m, {})
+  check("auto connector: guard_state follows the probe", r.devices.connector, "HDMI-A-1")
+  check("auto connector: guard_state reads its dpms node", r.guard_state(m).dpms, "Off")
+end
+
+do
+  -- A degraded piece elsewhere (no colour-temp sensor) leaves the guards alone.
+  local m = healthy({ files = {
+    [IIO .. "iio:device2/in_colortemp_raw"] = false,
+    [DRM .. "card1-eDP-1/dpms"] = "Off\n" } })
+  local g = hardware.discover(m, {}).guard_state(m)
+  check("colortemp missing: dpms guard unaffected", g.dpms, "Off")
+  check("colortemp missing: lid guard unaffected", g.lid_closed, false)
+end
+
 print(string.format("%d checks, %d failure(s)", checks, failures))
 if failures > 0 then
   error(string.format("%d check(s) failed", failures), 0)
