@@ -24,7 +24,8 @@ echo "--- lint ---"
 luau-analyze als-brightness/policy.luau als-brightness/colortemp.luau \
   als-brightness/curve.luau als-brightness/curve_source.luau \
   als-brightness/settings_spec.luau als-brightness/profile.luau \
-  als-brightness/hardware.luau als-brightness/adaptation.luau
+  als-brightness/hardware.luau als-brightness/adaptation.luau \
+  als-brightness/temperature.luau
 
 echo
 echo "--- manifest ---"
@@ -60,10 +61,10 @@ tmp_expected="$(mktemp)"
 tmp_actual="$(mktemp)"
 luau tests/print-defaults.luau >"$tmp_expected"
 python3 - als-brightness/plugin.toml als-brightness/translations/en.json \
-  als-brightness/service.luau "$tmp_actual" <<'PY'
+  als-brightness/service.luau als-brightness/curve_source.luau "$tmp_actual" <<'PY'
 import json, re, sys, tomllib
 
-manifest_path, en_path, service_path, out_path = sys.argv[1:5]
+manifest_path, en_path, service_path, curve_source_path, out_path = sys.argv[1:6]
 
 with open(manifest_path, "rb") as fh:
     manifest = tomllib.load(fh)
@@ -71,6 +72,8 @@ with open(en_path, encoding="utf-8") as fh:
     en = json.load(fh)["settings"]
 with open(service_path, encoding="utf-8") as fh:
     service = fh.read()
+with open(curve_source_path, encoding="utf-8") as fh:
+    curve_source = fh.read()
 
 settings = manifest["setting"]
 by_key = {s["key"]: s for s in settings}
@@ -129,22 +132,41 @@ for key in sorted(en):
             problems.append("FAIL  {}.{} carries a numeric literal in static prose: {!r}".format(
                 key, field, value))
 
-# The percent clamp defaults also live as literal fallbacks in service.luau
-# (setting_number("min_percent", 15)). A literal must equal the shipped default;
-# absence is fine -- a fallback expressed through policy.DEFAULTS has one owner
-# already.
-for key in ("min_percent", "max_percent"):
-    m = re.search(r'setting_number\("' + key + r'",\s*([0-9.]+)\)', service)
-    if m and m.group(1) != str(by_key[key]["default"]):
-        problems.append("FAIL  service.luau falls back to {} for {} but plugin.toml defaults to {}".format(
-            m.group(1), key, by_key[key]["default"]))
+# Read-helper fallbacks also live as literal defaults in the code
+# (setting_number("min_percent", 15), setting_bool("enabled", true),
+# read_bool(settings.learning_profile, false)). A literal must equal the
+# shipped default; absence is fine -- a fallback expressed through
+# policy.DEFAULTS has one owner already. Covers number, bool and string
+# defaults so flipping a plugin.toml `default` cannot silently drift.
+def canon(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+fallback_specs = (
+    ("service.luau", service, r'setting_number\("KEY",\s*([0-9.]+)\)',
+     ("min_percent", "max_percent")),
+    ("service.luau", service, r'setting_bool\("KEY",\s*(true|false)\)',
+     ("enabled", "colortemp")),
+    ("service.luau", service, r'setting_string\("KEY",\s*"([^"]*)"\)',
+     ("backlight", "connector")),
+    ("curve_source.luau", curve_source, r'read_bool\(settings\.KEY,\s*(true|false)\)',
+     ("learning_profile",)),
+)
+for where, text, pattern, keys in fallback_specs:
+    for key in keys:
+        m = re.search(pattern.replace("KEY", key), text)
+        if m and m.group(1) != canon(by_key[key]["default"]):
+            problems.append(
+                "FAIL  {} falls back to {} for {} but plugin.toml defaults to {}".format(
+                    where, m.group(1), key, canon(by_key[key]["default"])))
 
 if problems:
     print("\n".join(problems))
     sys.exit(1)
 print("ok    {} settings x 2 keys wired to translations/en.json, no orphans".format(len(settings)))
 print("ok    the {} non-node rows carry no numeric literal in static prose".format(non_node))
-print("ok    min/max_percent fallback literals match the manifest defaults")
+print("ok    literal fallbacks (number/bool/string) match the manifest defaults")
 
 with open(out_path, "w", encoding="utf-8") as fh:
     fh.write("".join(line + "\n" for line in sorted(rows)))
@@ -185,6 +207,7 @@ echo
 echo "--- tests ---"
 luau tests/policy.test.luau
 luau tests/colortemp.test.luau
+luau tests/temperature.test.luau
 luau tests/curve.test.luau
 luau tests/curve_source.test.luau
 luau tests/settings_spec.test.luau

@@ -16,6 +16,8 @@
 --                    learned nudges, and every curve log line (one report)
 --   profile.luau     the learned profile fitted from the owner's overrides
 --   colortemp.luau   the night-light config splice and its guard rail
+--   temperature.luau the night-light temperature write path: the splice gate
+--                    and the applied-K bookkeeping (one function, injected IO)
 --
 -- What is left here is a thin, boring shim: read settings and sysfs into one
 -- snapshot, hand it to adaptation.decide() with the injected clock, and perform
@@ -26,7 +28,7 @@
 local policy = require("./policy.luau")
 local adaptation = require("./adaptation.luau")
 local curve_source = require("./curve_source.luau")
-local colortemp = require("./colortemp.luau")
+local temperature = require("./temperature.luau")
 local profile = require("./profile.luau")
 local hardware = require("./hardware.luau")
 
@@ -116,9 +118,10 @@ for k, v in pairs(policy.DEFAULTS) do CFG[k] = v end
 -- session has seen (log, last_written, override, idle, locked, last_reason) and
 -- what it has done (last_ms, applied_k, last_temp_s). The learned profile and
 -- the curve-source report live here too, because decide() records observations
--- and rebuilds the curves as part of the decision. Two fields are written by
--- THIS file from IO outcomes, never by decide(): `locked` (the async status
--- poll below) and `applied_k`/`last_temp_s` (the temperature splice results).
+-- and rebuilds the curves as part of the decision. Two fields are written from
+-- IO outcomes, never by decide(): `locked` (the async status poll below) and
+-- `applied_k`/`last_temp_s` (temperature.write_path's splice bookkeeping --
+-- its ONE owner, see temperature.luau).
 --
 -- cs is the curve-source report from curve_source.resolve(): which curve the
 -- tick evaluates, and why. curve_settings is one snapshot of the curve config
@@ -238,44 +241,34 @@ end
 -- an atomic replace (write a sibling, rename over the target) so a reader never
 -- sees a half-written file, and the content is spliced as text so the user's
 -- comments and key order survive.
+--
+-- The write path itself -- which attempt skips, which performs, and what each
+-- does to the applied-K bookkeeping -- is temperature.write_path(): one pure
+-- function over an injected environment (the hardware.discover() shape), so
+-- every exit path lives in one place and each is named in
+-- tests/temperature.test.luau. What is left here is the IO bindings and the
+-- executor dispatch.
+--
+-- perform is forward-declared because the write path hands its action list back
+-- to the executor, exactly like decide()'s list.
+local perform
+
 local function apply_temperature(kelvin, now_s)
-  local settings_path = HW.paths.settings_path
-  if settings_path == nil then
-    -- Degraded at the probe (HOME unset): skip, and never guess a path.
-    warn_once("settings-path", "colortemp skipped: no settings path (HOME unset)")
-    return
-  end
-  local text = noctalia.readFile(settings_path)
-  if text == nil then
-    log("colortemp: cannot read " .. settings_path)
-    return
-  end
-  local new_text, changed = colortemp.splice(text, kelvin)
-  if not changed then
-    -- Already correct; record it so we stop reconsidering until the ambient moves.
-    SESSION.applied_k = kelvin
-    SESSION.last_temp_s = now_s
-    return
-  end
-  local tmp = settings_path .. ".als-brightness.tmp"
-  if not noctalia.writeFile(tmp, new_text) then
-    log("colortemp: cannot write " .. tmp)
-    return
-  end
-  if not noctalia.renameFile(tmp, settings_path) then
-    log("colortemp: cannot replace " .. settings_path)
-    return
-  end
-  noctalia.runAsync({ "noctalia", "msg", "config-reload" }, nil, 8000)
-  SESSION.applied_k = kelvin
-  SESSION.last_temp_s = now_s
-  log(string.format("colortemp: applied %dK", math.floor(kelvin)))
+  perform(temperature.write_path(SESSION, kelvin, now_s, {
+    settings_path = HW.paths.settings_path,
+    read_file = noctalia.readFile,
+    write_file = noctalia.writeFile,
+    rename = noctalia.renameFile,
+    reload = function()
+      noctalia.runAsync({ "noctalia", "msg", "config-reload" }, nil, 8000)
+    end,
+  }))
 end
 
 -- ── the executor ─────────────────────────────────────────────────────────────
 -- Walks decide()'s action list in order. Everything here is IO or IO feedback;
 -- every choice about WHAT to do was already made in adaptation.decide().
-local function perform(actions)
+perform = function(actions)
   for _, action in ipairs(actions) do
     local kind = action.kind
     if kind == "log" then
@@ -323,8 +316,13 @@ function update()
   ticks = ticks + 1
   -- The clock is INJECTED as a reading (noctalia.nowMs, milliseconds); decide()
   -- converts to seconds exactly once. Nothing below this line does time math.
-  perform(adaptation.decide(SESSION, ticks, read_observed(), {}, CFG,
-    { now_ms = noctalia.nowMs(), paths = HW.paths }))
+  -- Sampled first and hoisted to a local: Lua argument-evaluation order is
+  -- unspecified, and the clock must be the tick's instant, not "somewhere
+  -- around" the observation.
+  local now_ms = noctalia.nowMs()
+  local observed = read_observed()
+  perform(adaptation.decide(SESSION, ticks, observed, {}, CFG,
+    { now_ms = now_ms, paths = HW.paths }))
 end
 
 -- ── hooks ────────────────────────────────────────────────────────────────────
@@ -341,8 +339,11 @@ function onIpc(event, _payload)
   -- The event is decided at its own instant (tick = nil): the handshake and the
   -- keybinding signal land in the log when they happen, never a tick later. The
   -- event vocabulary and every state transition live in adaptation.decide().
-  perform(adaptation.decide(SESSION, nil, read_observed(), { event }, CFG,
-    { now_ms = noctalia.nowMs(), paths = HW.paths }))
+  -- Clock first, hoisted, same as the tick above.
+  local now_ms = noctalia.nowMs()
+  local observed = read_observed()
+  perform(adaptation.decide(SESSION, nil, observed, { event }, CFG,
+    { now_ms = now_ms, paths = HW.paths }))
 end
 
 function onConfigChanged()
