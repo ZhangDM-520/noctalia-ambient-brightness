@@ -1081,10 +1081,12 @@ Phase 7 moves all of it behind one module, `hardware.luau`:
   guard inputs (`dpms` / `lid_closed`) with the unavailable-guard-passes
   decision folded in, read through the same injected env.
 - **Seam:** two adapters make it real — the Noctalia environment (service.luau)
-  and a fake machine (tests/hardware.test.luau: 40 checks over 13 machine
-  shapes: no sensor, `in_illuminance_input` fallback, raw-beats-input across
-  devices, no/forced/unreadable backlight, bad connector, no outputs, no lid,
-  no DPMS, no colortemp sensor, unset HOME).
+  and a fleet of fake machines (tests/hardware.test.luau: 56 checks — no
+  sensor, `in_illuminance_input` fallback, raw-beats-input across devices,
+  no/forced/multi/unreadable backlight, bad and auto-picked connector, no
+  outputs, no lid, no DPMS, no colortemp sensor, unset HOME, plus the
+  guard_state shapes: probe-time read failure keeps the probed truth, lid
+  closed, and a degraded piece next to a live guard).
 - **Required vs degraded:** no ambient sensor, no readable backlight, an
   explicit setting naming hardware this machine lacks, or no output to drive →
   `required_missing`: one `noctalia.notifyError`, a log line, the service idles

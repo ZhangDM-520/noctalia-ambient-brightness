@@ -15,7 +15,8 @@ Reference-machine evidence. The plugin discovers devices at runtime
 - **On the reference machine the ambient sensor is `iio:device2`, `name = als`**
   (AMD SFH, `HID-SENSOR-200041`). `lux = in_illuminance_raw / 10`. Reads are **0.03 ms**
   median, so a 1 Hz poll is cheap despite each read being a synchronous
-  hub transaction with runtime-PM churn.
+  hub transaction with runtime-PM churn. What the poll loop costs the machine
+  overall is measured in `docs/POWER.md` (power reference, 2026-09-26).
 - **The sensor cannot see the panel.** A 100× change in backlight output moved
   the reading by zero counts. Do not design for a feedback loop on this chassis.
 - **On the reference machine `/sys/class/backlight/amdgpu_bl1` has
@@ -116,11 +117,14 @@ Reference-machine evidence. The plugin discovers devices at runtime
 
 Rules the code and tests enforce on any machine.
 
-- All decision logic lives in the **pure** `curve.luau` / `profile.luau` /
-  `policy.luau` / `colortemp.luau` modules; `service.luau` and `hardware.luau`
-  are the only files allowed to touch hardware, the shell or the filesystem —
-  `hardware.luau` through its injected environment, so a fake machine replaces it
-  in tests. This is what makes 366 checks runnable without a display.
+- All decision logic lives in the **pure** `curve.luau` / `curve_source.luau` /
+  `settings_spec.luau` / `adaptation.luau` / `profile.luau` / `policy.luau` /
+  `colortemp.luau` / `temperature.luau` modules; `service.luau` (a thin shim:
+  read, call, execute the returned actions) and `hardware.luau` are the only
+  files allowed to touch hardware, the shell or the filesystem — `hardware.luau`
+  through its injected environment, so a fake machine replaces it in tests. This
+  is what makes the checks runnable without a display: **970 checks across 9
+  suites**, 0 failures (measured with `./run-tests.sh`, 2026-09-26).
 - **Host slider settings: `type = "int"` with `min`/`max`/`step`** (also `double`);
   the default must lie within [min, max] and `step > 0`. `visible_when = { key,
   values }` gates a control on another setting — the temperature sliders use
@@ -134,21 +138,25 @@ Rules the code and tests enforce on any machine.
   `tests/curve.test.luau`; a global-range check is too weak and was measured
   passing a curve that overshot by 5.93 points. (DESIGN §9.2)
 - **The manifest defaults and the code defaults must agree**, or the number the
-  settings page shows is not the number in use. `run-tests.sh` diffs them — and
-  diffs the **keys** as well as the values, because the editor sorts rows by key as
-  text, so a key that loses its zero-padding reorders the curve on screen without
-  changing a single number. Since Phase 6 the diff also covers the 20 slider
-  defaults and their min/max/step windows against `curve.threshold_window`.
-  (DESIGN §9, §10)
+  settings page shows is not the number in use. The check runs through
+  `settings_spec.surface_rows()` — the drift-check authority derives the
+  expected `plugin.toml` rows and `en.json` strings from the code constants,
+  and `run-tests.sh` diffs the shipped copies against it (keys as well as
+  values, because the editor sorts rows by key as text, so a key that loses its
+  zero-padding reorders the curve on screen without changing a single number).
+  The diff also covers the 20 slider defaults and their min/max/step windows
+  against `curve.threshold_window`. (DESIGN §9, §10, §12.5)
 - **A curve node is (threshold, output): outputs are fixed, sliders choose
   thresholds.** `curve.buildNodes` pairs, sorts and repairs to strictly
   increasing x; a slider crossing its neighbour swaps two steps and cannot break
   the curve. Precedence: an **edited** `curve_*` map wins over the sliders
   (`curve.map_is_custom` compares parsed nodes, so re-ordering/whitespace is not
   an edit) and **learning is suspended** while it does. Learning drifts
-  thresholds (EMA toward the observed ambient) and never outputs. Settings-row
+  thresholds (EMA toward the observed ambient) and never outputs. Precedence is
+  decided in one place, `curve_source.resolve` (DESIGN §12.3). Settings-row
   titles are **bare node ids** (`Temp node 8`) and the description states the
-  mapping (`sensor ambient temp mapped -> 6500K`). Never put a value in a
+  mapping (`sensor ambient temp mapped -> 6080K` — row 8's fixed output,
+  `FIXED_TEMPERATURE_Y[8]`). Never put a value in a
   title: it is a static string (host has no live-label interpolation) and it
   goes stale on the first slider move. The temperature curve ships **ten
   distinct outputs plus four hidden anchors** (`curve.with_anchors` on both
@@ -157,11 +165,13 @@ Rules the code and tests enforce on any machine.
   where PCHIP's zero tangent works invisibly (14 compiled / 10 visible).
   (DESIGN §12.2, §12.3, §12.4)
 - **Nothing may be learned while the session is idle.** The 30 % idle dim is
-  authored policy, not a preference; both the tick and the `onIpc` handler check
-  `S.idle` before recording an observation. (DESIGN §4)
+  authored policy, not a preference; `adaptation.decide` checks `session.idle`
+  before recording an observation on both the tick and the event paths.
+  (DESIGN §4)
 - **Time in the pure modules is SECONDS.** `noctalia.nowMs()` is milliseconds;
-  convert once at the boundary. Mixing them silently makes every timeout fire
-  immediately. (DESIGN §5)
+  convert once at the boundary — the single conversion lives in
+  `adaptation.decide` (`opts.now_ms` is named for its unit). Mixing them
+  silently makes every timeout fire immediately. (DESIGN §5)
 - The **clock is a parameter**, never read inside the pure modules.
 - Editing a user's TOML: **splice as text, never parse and re-serialise**, and
   return the input byte-for-byte when nothing changes. Same rule as `nri-idle`.
@@ -235,10 +245,15 @@ The method that works, for any transient on-screen effect:
   `amdgpu_bl1`, `/home/zhangdm` were all true only on one machine. Every path now
   comes from `hardware.luau`'s `discover(env, opts)` — one injected-environment
   interface whose report splits `required_missing` (idle + one notification,
-  write nothing) from `degraded` (drop that feature/guard, keep adapting).
+  write nothing) from `degraded` (drop that feature/guard, keep adapting) and
+  carries `guard_state(env)`, the runtime guard inputs with the
+  unavailable-guard-passes decision folded in at the probe (DESIGN §13).
 - **An unavailable guard must PASS, not block.** `policy.guard` blocks unless
   `dpms == "On"`; a hardcoded wrong path made it read `nil` forever, so the
-  plugin silently never adapted. Missing DPMS/lid now degrade to "guard passes".
+  plugin silently never adapted. Missing DPMS/lid now degrade to "guard passes"
+  inside `hardware.guard_state` — the service never re-derives that from nil
+  paths. A device that *was* probed but fails to read later keeps its raw
+  result (nil dpms blocks): availability is decided once, at the probe.
 - **Discovery runs once, at start — deliberately.** Re-probing per tick or per
   config change buys CPU cost for a rare case; the remedy for hotplug or a
   changed `connector`/`backlight` setting is toggling the plugin off and on

@@ -21,7 +21,8 @@ A
 separate daemon writing sysfs directly would be a second owner of the same
 thing and would desynchronise the shell's own state. Noctalia's plugin API can
 hold the whole feature — a headless `[[service]]` with a poll loop and direct
-sysfs reads — so that is where it lives.
+sysfs reads — so that is where it lives. What that poll loop costs the machine
+is measured in [`docs/POWER.md`](docs/POWER.md).
 
 The fallback (a `~/.local/bin` Python daemon in the style of
 `media-idle-bridge`) is not needed: every capability the design depends on was
@@ -89,7 +90,8 @@ brightness; 5100 K … 6500 K for panel warmth) and **one slider per node choose
 its threshold**.
 
 In the settings rows the **title is just the node id** (`Temp node 8`) and the
-description states what it maps to (`sensor ambient temp mapped -> 6500K`).
+description states what it maps to (`sensor ambient temp mapped -> 6080K` —
+row 8's fixed output, `FIXED_TEMPERATURE_Y[8]` in `curve.luau`).
 The temperature curve compiles **four hidden anchors** (two below row 1, two
 above row 10, replicating floor and ceiling) so PCHIP keeps its flat tangent
 at both ends: ten rows in the UI, fourteen under the hood.
@@ -221,28 +223,36 @@ problem; the change callback is, and it fires for every writer.
 ./run-tests.sh
 ```
 
-366 checks over the pure decision logic. No hardware, no clock, no shell needed —
-which is the reason all the logic lives in `policy.luau`, `curve.luau`,
-`profile.luau`, `colortemp.luau` and `hardware.luau` rather than in the service
-entry point.
+970 checks across 9 suites over the pure decision logic. No hardware, no clock,
+no shell needed — which is the reason all the logic lives in `curve.luau`,
+`curve_source.luau`, `settings_spec.luau`, `adaptation.luau`, `policy.luau`,
+`profile.luau`, `colortemp.luau` and `temperature.luau`, plus `hardware.luau`'s
+injected-IO seam, rather than in the service entry point.
 
 The script also runs `noctalia plugins lint` (the only guard against an
 unrecognised setting `type`, which the host silently degrades to a plain string),
-and diffs the curve defaults in `plugin.toml` against those in `curve.luau` so the
-settings page and the code cannot disagree about the shipped curve.
+and diffs the settings surface — the `plugin.toml` rows and the
+`translations/en.json` text — against `settings_spec.luau`'s derivation from the
+code constants, so the settings page and the code cannot disagree about the
+shipped curve.
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
 | `docs/CURRENT.md` | **Start here.** Current-state module map, glossary and decision records for maintainers. |
-| `als-brightness/service.luau` | The `[[service]]` entry point. The only file that directly touches hardware, the shell or the filesystem (everything else gets it through seams). |
-| `als-brightness/hardware.luau` | Pure (injected IO): hardware discovery (`discover(env, opts)` scans iio, backlight, connector, DPMS, lid and HOME, and decides degraded vs missing before anything loads). |
-| `als-brightness/curve.luau` | Pure: the user-owned curves, PCHIP interpolation, node parsing. |
-| `als-brightness/profile.luau` | Pure: the learned profile — recording, band fitting, defensive loading. |
+| `als-brightness/service.luau` | The `[[service]]` entry point, a thin shim: reads settings and sysfs, calls the pure modules, performs the actions they return. The only file that directly touches hardware, the shell or the filesystem (everything else gets it through seams). |
+| `als-brightness/hardware.luau` | Injected-IO seam: hardware discovery (`discover(env, opts)` scans iio, backlight, connector, DPMS, lid and HOME, and decides degraded vs missing before anything loads) plus `guard_state(env)`, the runtime guard adapter. |
+| `als-brightness/curve.luau` | Pure: the user-owned curves — node parsing, PCHIP interpolation, fixed outputs, hidden anchors, the shipped constants. |
+| `als-brightness/curve_source.luau` | Pure: `resolve(settings, opts)` — which curve is live and why (config readers, map-vs-sliders precedence, learned nudges, log-line formats). |
+| `als-brightness/settings_spec.luau` | Pure: the settings-surface drift authority — derives the expected `plugin.toml` rows and `en.json` description strings from the code constants. |
+| `als-brightness/adaptation.luau` | Pure: `decide(...)` with an injected clock — the idle/override/learning timeline, returned as an ordered action list the service executes. |
 | `als-brightness/policy.luau` | Pure brightness policy: stabiliser, slew, dead-band, override window, guards. |
+| `als-brightness/profile.luau` | Pure: the learned profile — recording, band fitting, defensive loading. |
 | `als-brightness/colortemp.luau` | Pure: the temperature guard rail and the `settings.toml` splice. |
+| `als-brightness/temperature.luau` | Pure: the temperature write path — splice gate and the splice → replace → reload sequence as returned actions; sole owner of the applied-K bookkeeping. |
 | `als-brightness/translations/en.json` | Settings-row titles and descriptions (loaded at plugin load). |
-| `tests/` | Unit tests for the five pure modules (curve, policy, profile, colortemp, hardware). |
+| `tests/` | Unit tests for the pure modules and the hardware seam — 9 suites, 970 checks (policy, colortemp, temperature, curve, curve_source, settings_spec, adaptation, profile, hardware). |
 | `docs/DESIGN.md` | Phase-by-phase design history: every decision and the measurement behind it. Current state lives in docs/CURRENT.md. |
+| `docs/POWER.md` | Power reference: meter verdicts, measurement protocol and reference numbers for the plugin's runtime cost. |
 | `catalog.toml` | Makes this repository installable as a plugin source. |

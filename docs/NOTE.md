@@ -278,3 +278,40 @@ first.
 - Pitfalls re-confirmed: `pgrep -f` self-match (use `pgrep -x`), column-blind awk
   (verify the TSV header before attributing a column), and reboot/rewind kills
   all background agents — their partial work must be re-validated cold.
+
+## Wave F: temperature write path + review follow-ups (2026-09-26)
+
+- **Wave F (temperature.luau)**: `apply_temperature`'s open-coded splice → write →
+  reload with five return paths became `temperature.write_path(state, kelvin,
+  now_s, env)` — pure, injected IO, and the SOLE owner of the
+  `applied_k`/`last_temp_s` bookkeeping (the old code recorded only on some
+  paths). The splice gate moved to `temperature.should_apply` (thresholds stay
+  in `colortemp`). `curve.luau` cleanup: `is_finite` has one home (now exported;
+  `profile.luau` imports it), `with_anchors` got its own documented section, and
+  `from_list` was deleted after a repo-wide verdict (zero callers; the
+  `tests/curve.test.luau:125` hit is a *local* alias of `curve.parse_nodes`).
+  Each of the 5 no-write return paths plus the applied path has a named test —
+  `tests/temperature.test.luau`, 58 checks. Live-reload verified through the new
+  path (`colortemp: applied 5574K`), log formats byte-identical.
+- **Regression review of 17851af..f2a161a** (read-only, all six behavioral
+  categories clean: 21 log strings, precedence branches, ms/s single conversion,
+  guard semantics, wiring order). Two items fixed here:
+  1. *Drift check gap (latent)*: `run-tests.sh` literal-checked only the
+     `setting_number` fallbacks, so flipping a `plugin.toml` `default` for a
+     bool/string setting stayed green. Now `setting_bool` / `setting_string` /
+     `read_bool` fallbacks are checked too (enabled, colortemp, learning_profile,
+     backlight, connector). Falsifiability proven by mutation probe: flipping
+     `colortemp`'s default yields `FAIL service.luau falls back to false ...`.
+  2. *Clock-order nit*: `update()`/`onIpc()` evaluated `read_observed()` before
+     `noctalia.nowMs()` in call arguments — Lua evaluation order is unspecified,
+     so the clock is now sampled first and hoisted to locals at both sites.
+- **Docs sync**: module maps (README Layout + docs/CURRENT.md) now include
+  `temperature.luau`; counts everywhere say **970 checks / 9 suites**
+  (41 policy, 44 colortemp, 58 temperature, 178 curve, 126 curve_source,
+  331 settings_spec, 73 adaptation, 63 profile, 56 hardware); DESIGN §13's
+  "40 checks over 13 machine shapes" refreshed to the measured 56 with the
+  current shape list (standalone `luau tests/hardware.test.luau` = 56/0).
+- Pitfall: a mutation probe run in parallel with a read of the same tree
+  contaminates the read (both saw the deliberately-broken state). Run mutation
+  probes alone, re-read after revert.
+- Gate: `./run-tests.sh` = **970 checks / 0 failures** on the final tree.
