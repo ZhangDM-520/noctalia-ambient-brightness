@@ -34,9 +34,11 @@
 --               last_reason    last suspension reason, so the suspend/resume
 --                              lines fire on CHANGE only
 --               last_ms        previous tick's clock reading in MILLISECONDS
---               applied_k      kelvin last written (number|nil; the executor
---                              writes it from apply_temperature IO outcomes)
---               last_temp_s    that write's time in SECONDS (executor-owned)
+--               applied_k      kelvin last written (number|nil;
+--                              temperature.write_path records it from the
+--                              splice outcomes -- its ONE owner)
+--               last_temp_s    that write's time in SECONDS (also
+--                              temperature.write_path's)
 --               profile        the learned profile (profile.new() shape)
 --               curve_settings the curve config snapshot rebuilds re-use
 --               cs             the curve_source report (built curves + the
@@ -92,6 +94,7 @@ local curve = import("curve")
 local curve_source = import("curve_source")
 local profile = import("profile")
 local colortemp = import("colortemp")
+local temperature = import("temperature")
 
 -- Cadence, in ticks (1 Hz ticks). The lock poll is its own slow lane because
 -- `noctalia msg status` is a shell-out (see service.poll_locked).
@@ -335,8 +338,7 @@ function M.decide(session, tick, observed, events, cfg, opts)
     if ambient_k ~= nil and ambient_k > 0 then
       local mapped = curve.eval(session.cs.temperature.built, ambient_k)
       local target_k = colortemp.clamp_k(mapped, colortemp.MAP_DEFAULTS)
-      if target_k ~= nil
-         and colortemp.should_apply(session.applied_k, target_k, session.last_temp_s, now_s) then
+      if target_k ~= nil and temperature.should_apply(session, target_k, now_s) then
         actions[#actions + 1] = { kind = "apply_temperature", kelvin = target_k, now_s = now_s }
       end
     end

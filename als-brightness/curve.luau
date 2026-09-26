@@ -24,9 +24,13 @@
 
 local M = {}
 
+-- The one numeric predicate. Shared with profile.luau (which imports it to
+-- sanitise profile.json); this is its single home.
 local is_finite = function(v)
   -- The type check is load-bearing: without it a *string* passes, because
-  -- `"nonsense" ~= math.huge` is true in Lua.
+  -- `"nonsense" ~= math.huge` is true in Lua. That let a corrupt profile.json
+  -- through validation once -- exactly what profile.sanitise() exists to
+  -- prevent -- so the type check stays however redundant it looks.
   if type(v) ~= "number" then return false end
   if v ~= v then return false end -- NaN
   return v ~= math.huge and v ~= -math.huge
@@ -379,12 +383,8 @@ function M.buildNodes(thresholds, fixed_ys, opts)
   return nodes, problems
 end
 
--- ── interpolation ────────────────────────────────────────────────────────────
+-- ── the hidden temperature anchors ─────────────────────────────────
 
---- Precompute tangents for a node list. Returns nil for an empty list.
---
--- `nodes` must already be ascending with unique x. Duplicated or descending x
--- makes the tangent maths meaningless, so it is rejected rather than guessed at.
 --- The four hidden anchor nodes of the temperature curve: two below the first
 --- row, two above the last, each replicating that endpoint's output. Never
 --- shown -- the settings page and the map editor see the ten rows -- but
@@ -411,6 +411,12 @@ function M.with_anchors(nodes)
   return out
 end
 
+-- ── interpolation ────────────────────────────────────────────────────────────
+
+--- Precompute tangents for a node list. Returns nil for an empty list.
+--
+-- `nodes` must already be ascending with unique x. Duplicated or descending x
+-- makes the tangent maths meaningless, so it is rejected rather than guessed at.
 function M.compile(nodes)
   local n = nodes and #nodes or 0
   if n == 0 then return nil end
@@ -495,13 +501,6 @@ function M.is_monotone(nodes)
     if nodes[i].y < nodes[i - 1].y then return false end
   end
   return true
-end
-
---- Compile a "x:y" list in one step. Convenience for the service, which does this
--- on config change and never per tick.
-function M.from_list(items, opts)
-  local nodes, problems = M.parse_nodes(items, opts)
-  return M.compile(nodes), nodes, problems
 end
 
 return M

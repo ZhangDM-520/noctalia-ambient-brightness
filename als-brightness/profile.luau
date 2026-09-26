@@ -46,13 +46,21 @@ M.DEFAULTS = {
   learn_alpha = 0.15,
 }
 
-local is_finite = function(v)
-  -- The type check is load-bearing: without it a *string* passes, because
-  -- `"nonsense" ~= math.huge` is true in Lua. That let a corrupt profile.json
-  -- through validation, which is exactly what sanitise() exists to prevent.
-  if type(v) ~= "number" then return false end
-  if v ~= v then return false end -- NaN
-  return v ~= math.huge and v ~= -math.huge
+-- The numeric predicate has ONE home: curve.luau exports it (M.is_finite), and
+-- this file is the second consumer (a corrupt profile.json once passed
+-- validation here, which is exactly what sanitise() exists to prevent).
+-- Require resolution differs between the two environments this file runs in:
+-- the Noctalia host resolves "./curve.luau" (with the extension) while the
+-- standalone luau resolves "./curve" (without) and rejects the extension form.
+-- Try the host form first, fall back to the interpreter form (same as
+-- adaptation.luau).
+local is_finite
+do
+  local ok, mod = pcall(require, "./curve.luau")
+  if not ok then
+    mod = require("./curve")
+  end
+  is_finite = mod.is_finite
 end
 
 --- A fresh, empty profile.
