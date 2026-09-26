@@ -253,3 +253,28 @@ first.
 + 178 curve + 63 profile + 40 hardware), lint and manifest lint clean,
 "plugin.toml and curve.luau ship the same 40 nodes" ok, catalog/plugin version
 0.4.0 agree. The luau diffs in this wave are comment-only.
+
+## Power study P0–P4 + wave E completion (2026-09-26)
+
+- **Code first**: the reboot/wave-E interruption left `adaptation.luau` failing 4
+  checks in the override-expiry cluster. Root cause: the expiry tick continued
+  into the write stage, stomping its own re-baseline (panel snaps back to the
+  curve value and the next tick records a fresh override). Fixed: the expiry tick
+  now performs only the transition (`return actions`); resume + first adaptation
+  land on the next tick. One test check was over-strict vs. the pre-refactor
+  change-only suspend logging (proven from `git show HEAD`); it now proves
+  suspension by absence of writes. `run-tests.sh` wired for the suite:
+  **912 checks / 0 failures** across 8 suites. Live-reload verified clean.
+- **Power study** (trimmed per OLED burn-in concern: no dedicated S1 sigma
+  windows, no spark cycle): meter verdicts and the reproducible protocol in
+  docs/POWER.md. Headline numbers: settled platform floor ≈ 3.6 W, 1 Hz sigma
+  0.22 W; plugin steady-state cost −0.03 W = **below resolution**; single-shot
+  costs exceed the 3σ bar only for config-reload (+0.47 J), plugin disable
+  (+0.63 J), plugin enable (+0.21 J); a plain backlight write is invisible.
+  Scanner rule: 1 Hz deviations > 0.66 W or 2 s windows > 0.16 J over baseline.
+  The A/B pair-1 (+1.5 W) is a documented run-start GPU transient, not plugin
+  cost — ABBA's settled pair is the readable one. S2 sigma and spark energies
+  remain unmeasured (recorded as gaps).
+- Pitfalls re-confirmed: `pgrep -f` self-match (use `pgrep -x`), column-blind awk
+  (verify the TSV header before attributing a column), and reboot/rewind kills
+  all background agents — their partial work must be re-validated cold.
